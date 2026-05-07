@@ -36,6 +36,14 @@ def install_dep():
 
   try:
     pip_install("agent-framework", "--pre")
+    pip_install("semantic-kernel[ollama]")
+    pip_install("graphrag")
+    pip_install("lancedb")
+    pip_install("pyarrow")
+    pip_install("pypdf")
+    pip_install("pymupdf")
+    pip_install("python-docx")
+    pip_install("pywin32")
   except Exception as e:
     print(f"\nInstallation failed: {e}")
     print("\nTroubleshooting:")

@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Fujinami RAG</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f4f4f8; color: #1a1a2e; }
+    header { background: #16213e; color: #fff; padding: 14px 24px; font-size: 1.2rem; font-weight: 600; letter-spacing: .04em; }
+    main { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 16px; max-width: 1200px; margin: 0 auto; }
+    section { background: #fff; border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,.1); padding: 16px; }
+    h2 { font-size: .95rem; text-transform: uppercase; letter-spacing: .06em; color: #555; border-bottom: 1px solid #eee; padding-bottom: 8px; margin-bottom: 12px; }
+    table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #f0f0f0; }
+    th { background: #f8f8fc; font-weight: 600; }
+    button { cursor: pointer; border: none; border-radius: 4px; padding: 5px 12px; font-size: .85rem; }
+    .btn-primary { background: #0f3460; color: #fff; }
+    .btn-primary:hover { background: #1a4a80; }
+    .btn-danger  { background: #c0392b; color: #fff; }
+    .btn-danger:hover  { background: #e74c3c; }
+    .btn-warn   { background: #d68910; color: #fff; }
+    .btn-warn:hover   { background: #e67e22; }
+    input[type="text"], input[type="file"], select, textarea {
+      border: 1px solid #ccc; border-radius: 4px; padding: 5px 8px;
+      font-size: .88rem; width: 100%; margin-top: 4px;
+    }
+    textarea { resize: vertical; min-height: 60px; }
+    .form-row { display: flex; gap: 6px; align-items: flex-end; margin-top: 10px; flex-wrap: wrap; }
+    .form-row label { font-size: .82rem; color: #555; }
+    .form-row > div { flex: 1; min-width: 120px; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: .78rem; font-weight: 600; }
+    .badge-pending  { background: #fef9c3; color: #92400e; }
+    .badge-running  { background: #dbeafe; color: #1e40af; }
+    .badge-done     { background: #dcfce7; color: #166534; }
+    .badge-error    { background: #fee2e2; color: #991b1b; }
+    #answer-box { background: #f8f8fc; border-radius: 4px; padding: 10px; font-size: .88rem; white-space: pre-wrap; min-height: 80px; margin-top: 10px; }
+    details summary { cursor: pointer; font-size: .85rem; color: #0f3460; margin-top: 8px; }
+    .status-msg { font-size: .82rem; color: #555; margin-top: 6px; }
+    .radio-group { display: flex; gap: 12px; align-items: center; margin-top: 4px; font-size: .85rem; }
+    .radio-group label { display: flex; align-items: center; gap: 4px; }
+    @media(max-width: 700px) { main { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+<header>Fujinami RAG</header>
+<main>
+
+  <!-- ===== Collections ===== -->
+  <section id="panel-collections">
+    <h2>Collections</h2>
+    <table id="tbl-collections">
+      <thead><tr><th>Name</th><th>Docs</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="form-row">
+      <div>
+        <label>New collection name</label>
+        <input type="text" id="inp-col-name" placeholder="my-collection" />
+      </div>
+      <button class="btn-primary" onclick="createCollection()">Create</button>
+    </div>
+    <p class="status-msg" id="col-status"></p>
+  </section>
+
+  <!-- ===== Documents ===== -->
+  <section id="panel-documents">
+    <h2>Documents</h2>
+    <div class="form-row">
+      <div>
+        <label>Active collection</label>
+        <select id="sel-doc-col" onchange="loadDocuments()"></select>
+      </div>
+    </div>
+    <table id="tbl-documents" style="margin-top:10px">
+      <thead><tr><th>Filename</th><th>Size</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="form-row">
+      <div>
+        <label>Upload file</label>
+        <input type="file" id="inp-doc-file" />
+      </div>
+      <button class="btn-primary" onclick="uploadDocument()">Upload</button>
+    </div>
+    <p class="status-msg" id="doc-status"></p>
+  </section>
+
+  <!-- ===== Index ===== -->
+  <section id="panel-index">
+    <h2>Index</h2>
+    <div class="form-row">
+      <div>
+        <label>Collection</label>
+        <select id="sel-idx-col"></select>
+      </div>
+      <button class="btn-primary" onclick="triggerIndex()">Run Index</button>
+    </div>
+    <p class="status-msg" id="idx-status"></p>
+    <p id="idx-task-id" style="font-size:.8rem;color:#888;margin-top:4px;word-break:break-all;"></p>
+  </section>
+
+  <!-- ===== Query ===== -->
+  <section id="panel-query">
+    <h2>Query</h2>
+    <div class="form-row">
+      <div>
+        <label>Collection</label>
+        <select id="sel-qry-col"></select>
+      </div>
+    </div>
+    <label style="font-size:.82rem;margin-top:10px;display:block">Query</label>
+    <textarea id="inp-query" placeholder="Ask a question…"></textarea>
+    <div class="form-row" style="margin-top:8px">
+      <div>
+        <label>Method</label>
+        <div class="radio-group">
+          <label><input type="radio" name="qry-method" value="hybrid" checked /> hybrid</label>
+          <label><input type="radio" name="qry-method" value="vector" /> vector</label>
+          <label><input type="radio" name="qry-method" value="global" /> global</label>
+        </div>
+      </div>
+      <div style="flex:0;white-space:nowrap">
+        <label><input type="checkbox" id="chk-stream" /> stream</label>
+      </div>
+      <button class="btn-primary" onclick="submitQuery()">Ask</button>
+    </div>
+    <div id="answer-box"></div>
+    <details id="sources-detail" style="display:none">
+      <summary>Sources</summary>
+      <table id="tbl-sources" style="margin-top:6px">
+        <thead><tr><th>Doc</th><th>Chunk</th><th>Excerpt</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </details>
+  </section>
+
+</main>
+
+<script>
+/* -----------------------------------------------------------------------
+   Helpers
+----------------------------------------------------------------------- */
+const $ = id => document.getElementById(id);
+
+function fmt(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024*1024) return (bytes/1024).toFixed(1) + ' KB';
+  return (bytes/1024/1024).toFixed(1) + ' MB';
+}
+
+function badgeHtml(status) {
+  return `<span class="badge badge-${status}">${status}</span>`;
+}
+
+async function api(method, path, body, isForm) {
+  const opts = { method };
+  if (body && !isForm) {
+    opts.headers = { 'Content-Type': 'application/json' };
+    opts.body = JSON.stringify(body);
+  } else if (body) {
+    opts.body = body;
+  }
+  const res = await fetch(path, opts);
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { detail = (await res.json()).detail ?? detail; } catch (_) {}
+    throw new Error(detail);
+  }
+  if (res.status === 204) return null;
+  return res.json();
+}
+
+/* -----------------------------------------------------------------------
+   Collections
+----------------------------------------------------------------------- */
+async function loadCollections() {
+  const cols = await api('GET', '/collections');
+  renderCollectionsTable(cols);
+  populateSelects(cols.map(c => c.name));
+}
+
+function renderCollectionsTable(cols) {
+  const tbody = $('tbl-collections').querySelector('tbody');
+  tbody.innerHTML = cols.map(c => `
+    <tr>
+      <td>${c.name}</td>
+      <td>${c.doc_count}</td>
+      <td style="white-space:nowrap">
+        <button class="btn-warn" onclick="renameCollection('${c.name}')">Rename</button>
+        <button class="btn-danger" onclick="deleteCollection('${c.name}')">Delete</button>
+      </td>
+    </tr>`).join('');
+}
+
+function populateSelects(names) {
+  ['sel-doc-col','sel-idx-col','sel-qry-col'].forEach(id => {
+    const el = $(id);
+    const cur = el.value;
+    el.innerHTML = names.map(n => `<option${n===cur?' selected':''}>${n}</option>`).join('');
+  });
+}
+
+async function createCollection() {
+  const name = $('inp-col-name').value.trim();
+  if (!name) return;
+  try {
+    await api('POST', '/collections', { name });
+    $('inp-col-name').value = '';
+    $('col-status').textContent = `Created '${name}'.`;
+    await loadCollections();
+  } catch(e) { $('col-status').textContent = 'Error: ' + e.message; }
+}
+
+async function renameCollection(name) {
+  const newName = prompt(`Rename '${name}' to:`, name);
+  if (!newName || newName === name) return;
+  try {
+    await api('PATCH', `/collections/${name}`, { new_name: newName });
+    $('col-status').textContent = `Renamed '${name}' → '${newName}'.`;
+    await loadCollections();
+  } catch(e) { $('col-status').textContent = 'Error: ' + e.message; }
+}
+
+async function deleteCollection(name) {
+  if (!confirm(`Delete collection '${name}'? This cannot be undone.`)) return;
+  try {
+    await api('DELETE', `/collections/${name}`);
+    $('col-status').textContent = `Deleted '${name}'.`;
+    await loadCollections();
+  } catch(e) { $('col-status').textContent = 'Error: ' + e.message; }
+}
+
+/* -----------------------------------------------------------------------
+   Documents
+----------------------------------------------------------------------- */
+async function loadDocuments() {
+  const col = $('sel-doc-col').value;
+  if (!col) return;
+  try {
+    const docs = await api('GET', `/collections/${col}/documents`);
+    renderDocumentsTable(col, docs);
+    $('doc-status').textContent = '';
+  } catch(e) { $('doc-status').textContent = 'Error: ' + e.message; }
+}
+
+function renderDocumentsTable(col, docs) {
+  const tbody = $('tbl-documents').querySelector('tbody');
+  tbody.innerHTML = docs.map(d => `
+    <tr>
+      <td>${d.filename}</td>
+      <td>${fmt(d.size_bytes)}</td>
+      <td><button class="btn-danger" onclick="deleteDocument('${col}','${d.filename}')">Delete</button></td>
+    </tr>`).join('');
+}
+
+async function uploadDocument() {
+  const col = $('sel-doc-col').value;
+  const file = $('inp-doc-file').files[0];
+  if (!col || !file) return;
+  try {
+    const fd = new FormData();
+    fd.append('file', file);
+    await api('POST', `/collections/${col}/documents`, fd, true);
+    $('doc-status').textContent = `Uploaded '${file.name}'.`;
+    $('inp-doc-file').value = '';
+    await loadDocuments();
+  } catch(e) { $('doc-status').textContent = 'Error: ' + e.message; }
+}
+
+async function deleteDocument(col, filename) {
+  if (!confirm(`Delete '${filename}'?`)) return;
+  try {
+    await api('DELETE', `/collections/${col}/documents/${filename}`);
+    $('doc-status').textContent = `Deleted '${filename}'.`;
+    await loadDocuments();
+  } catch(e) { $('doc-status').textContent = 'Error: ' + e.message; }
+}
+
+/* -----------------------------------------------------------------------
+   Index
+----------------------------------------------------------------------- */
+let _pollTimer = null;
+
+async function triggerIndex() {
+  const col = $('sel-idx-col').value;
+  if (!col) return;
+  clearInterval(_pollTimer);
+  $('idx-status').innerHTML = badgeHtml('pending');
+  $('idx-task-id').textContent = '';
+  try {
+    const res = await api('POST', `/collections/${col}/index`);
+    $('idx-task-id').textContent = 'task_id: ' + res.task_id;
+    pollIndexStatus(col, res.task_id);
+  } catch(e) { $('idx-status').textContent = 'Error: ' + e.message; }
+}
+
+function pollIndexStatus(col, taskId) {
+  _pollTimer = setInterval(async () => {
+    try {
+      const s = await api('GET', `/collections/${col}/index/${taskId}`);
+      $('idx-status').innerHTML = badgeHtml(s.status) + (s.detail ? ` — ${s.detail}` : '');
+      if (s.status === 'done' || s.status === 'error') {
+        clearInterval(_pollTimer);
+        if (s.status === 'done') await loadCollections();
+      }
+    } catch(e) {
+      $('idx-status').textContent = 'Poll error: ' + e.message;
+      clearInterval(_pollTimer);
+    }
+  }, 2000);
+}
+
+/* -----------------------------------------------------------------------
+   Query
+----------------------------------------------------------------------- */
+async function submitQuery() {
+  const col = $('sel-qry-col').value;
+  const query = $('inp-query').value.trim();
+  const method = document.querySelector('input[name="qry-method"]:checked').value;
+  const stream = $('chk-stream').checked;
+  if (!col || !query) return;
+
+  $('answer-box').textContent = '';
+  $('sources-detail').style.display = 'none';
+  $('tbl-sources').querySelector('tbody').innerHTML = '';
+
+  if (stream) {
+    await streamQuery(col, query, method);
+  } else {
+    await nonStreamQuery(col, query, method);
+  }
+}
+
+async function nonStreamQuery(col, query, method) {
+  try {
+    const res = await api('POST', `/collections/${col}/query`, { query, method, stream: false });
+    $('answer-box').textContent = res.answer;
+    if (res.sources && res.sources.length > 0) {
+      renderSources(res.sources);
+    }
+  } catch(e) { $('answer-box').textContent = 'Error: ' + e.message; }
+}
+
+async function streamQuery(col, query, method) {
+  let answer = '';
+  const box = $('answer-box');
+  box.textContent = '';
+
+  try {
+    const resp = await fetch(`/collections/${col}/query`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, method, stream: true }),
+    });
+    if (!resp.ok) {
+      let msg = resp.statusText;
+      try { msg = (await resp.json()).detail ?? msg; } catch(_) {}
+      box.textContent = 'Error: ' + msg;
+      return;
+    }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+
+      const blocks = buf.split('\n\n');
+      buf = blocks.pop(); // keep incomplete block
+
+      for (const block of blocks) {
+        const lines = block.split('\n');
+        let eventType = 'message', data = '';
+        for (const line of lines) {
+          if (line.startsWith('event: ')) eventType = line.slice(7).trim();
+          else if (line.startsWith('data: ')) data = line.slice(6).trim();
+        }
+        if (eventType === 'token') {
+          try { answer += JSON.parse(data); } catch(_) { answer += data; }
+          box.textContent = answer;
+        } else if (eventType === 'sources') {
+          try { renderSources(JSON.parse(data)); } catch(_) {}
+        }
+      }
+    }
+  } catch(e) { box.textContent = 'Error: ' + e.message; }
+}
+
+function renderSources(sources) {
+  const tbody = $('tbl-sources').querySelector('tbody');
+  tbody.innerHTML = sources.map(s => `
+    <tr>
+      <td>${s.doc_id}</td>
+      <td>${s.chunk_index}</td>
+      <td>${s.excerpt}</td>
+    </tr>`).join('');
+  $('sources-detail').style.display = '';
+}
+
+/* -----------------------------------------------------------------------
+   Init
+----------------------------------------------------------------------- */
+loadCollections().then(() => loadDocuments());
+</script>
+</body>
+</html>
