@@ -7,3 +7,7 @@ def create_agent(name: str, instructions: str, tools) -> OllamaChatClient:
         instructions=instructions,
         tools=tools,
     )
+
+def create_chat_client() -> OllamaChatClient:
+    """Create a basic Ollama chat client."""
+    return OllamaChatClient(env_file_path = ".env")
