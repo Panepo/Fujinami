@@ -48,8 +48,7 @@ input:
   file_pattern: ".*\\.txt$$"
 
 cache:
-  type: file
-  base_dir: "cache"
+  type: none
 
 storage:
   type: file

@@ -270,7 +270,12 @@ class RagService:
             text=True,
         )
         if result.returncode != 0:
-            logger.warning("GraphRAG indexing stderr:\n%s", result.stderr)
+            logger.warning(
+                "GraphRAG indexing failed (rc=%d)\nstdout:\n%s\nstderr:\n%s",
+                result.returncode,
+                result.stdout,
+                result.stderr,
+            )
         else:
             logger.info("GraphRAG indexing completed successfully")
 
