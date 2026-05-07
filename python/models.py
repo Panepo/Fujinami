@@ -19,6 +19,7 @@ class CollectionRenameRequest(BaseModel):
 class CollectionInfo(BaseModel):
     name: str
     doc_count: int
+    index_status: Literal["not_indexed", "indexed", "new_docs"] = "not_indexed"
 
 
 class DocumentInfo(BaseModel):

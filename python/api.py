@@ -99,6 +99,36 @@ def _doc_count(name: str) -> int:
     )
 
 
+def _index_status(name: str) -> str:
+    """Return 'not_indexed', 'indexed', or 'new_docs' for the collection."""
+    manifest_path = _ROOT_DIR / "ragdata" / name / "lancedb" / "file_manifest.json"
+    data_dir = _ROOT_DIR / "data" / name
+
+    # Load manifest
+    stored: dict[str, dict] = {}
+    if manifest_path.exists():
+        try:
+            stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    if not stored:
+        return "not_indexed"
+
+    # Compare current files to manifest
+    if data_dir.exists():
+        for f in data_dir.iterdir():
+            if f.is_file() and f.suffix.lower() in SUPPORTED_EXTENSIONS:
+                prev = stored.get(f.name)
+                if prev is None:
+                    return "new_docs"
+                stat = f.stat()
+                if stat.st_mtime != prev["mtime"] or stat.st_size != prev["size"]:
+                    return "new_docs"
+
+    return "indexed"
+
+
 def _validate_name(name: str) -> None:
     if not _COLLECTION_NAME_RE.match(name):
         raise HTTPException(
@@ -120,7 +150,7 @@ async def serve_index() -> FileResponse:
 @app.get("/collections", response_model=list[CollectionInfo])
 async def list_collections() -> list[CollectionInfo]:
     return [
-        CollectionInfo(name=name, doc_count=_doc_count(name))
+        CollectionInfo(name=name, doc_count=_doc_count(name), index_status=_index_status(name))
         for name in sorted(_registry)
     ]
 

@@ -3,7 +3,7 @@ RagService — hybrid RAG using Semantic Kernel + LanceDB + Microsoft GraphRAG.
 
 Stack
 -----
-- LLM / Embeddings : Ollama (qwen3.6:9b / locusai/all-minilm-l6-v2:latest)
+- LLM / Embeddings : Ollama (qwen3.5:9b / locusai/all-minilm-l6-v2:latest)
 - Vector store      : LanceDB (persistent, embedded, file-based)
 - Graph engine      : Microsoft GraphRAG (CLI subprocess)
 """
@@ -54,6 +54,7 @@ _OLLAMA_BASE_URL = os.environ["OLLAMA_BASE_URL"]
 _CHAT_MODEL = os.environ["CHAT_MODEL"]
 _EMBEDDING_MODEL = os.environ["EMBEDDING_MODEL"]
 _VLM_MODEL = os.environ["VLM_MODEL"]
+_VLM_TIMEOUT = float(os.environ.get("VLM_TIMEOUT", "180"))
 
 
 class RagService:
@@ -196,6 +197,7 @@ class RagService:
         loader = DocumentLoader(
             ollama_base_url=_OLLAMA_BASE_URL,
             vlm_model=_VLM_MODEL,
+            request_timeout=_VLM_TIMEOUT,
         )
         doc_texts = loader.load_directory(documents_dir, files_filter=changed_sources)
 
@@ -462,6 +464,7 @@ class RagService:
     async def _generate_response(self, query: str, context: str) -> str:
         """Generate a final answer using the SK chat service given *context*."""
         from semantic_kernel.contents import ChatHistory  # noqa: PLC0415
+        from semantic_kernel.connectors.ai.prompt_execution_settings import PromptExecutionSettings  # noqa: PLC0415
 
         history = ChatHistory()
         history.add_system_message(
@@ -472,7 +475,8 @@ class RagService:
         history.add_user_message(
             f"Context:\n{context}\n\nQuestion: {query}"
         )
-        responses = await self._chat_service.get_chat_message_contents(history)
+        settings = PromptExecutionSettings()
+        responses = await self._chat_service.get_chat_message_contents(history, settings=settings)
         return str(responses[0]) if responses else ""
 
     # ------------------------------------------------------------------

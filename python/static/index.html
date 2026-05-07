@@ -8,7 +8,14 @@
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: system-ui, sans-serif; background: #f4f4f8; color: #1a1a2e; }
     header { background: #16213e; color: #fff; padding: 14px 24px; font-size: 1.2rem; font-weight: 600; letter-spacing: .04em; }
+    .tab-bar { background: #16213e; display: flex; gap: 0; padding: 0 24px; }
+    .tab-btn { background: none; border: none; border-bottom: 3px solid transparent; color: #aac4e8; padding: 10px 20px; font-size: .92rem; font-weight: 500; cursor: pointer; letter-spacing: .03em; transition: color .15s, border-color .15s; }
+    .tab-btn:hover { color: #fff; }
+    .tab-btn.active { color: #fff; border-bottom-color: #4a9eff; }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
     main { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 16px; max-width: 1200px; margin: 0 auto; }
+    main.single { grid-template-columns: 1fr; }
     section { background: #fff; border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,.1); padding: 16px; }
     h2 { font-size: .95rem; text-transform: uppercase; letter-spacing: .06em; color: #555; border-bottom: 1px solid #eee; padding-bottom: 8px; margin-bottom: 12px; }
     table { width: 100%; border-collapse: collapse; font-size: .88rem; }
@@ -34,6 +41,9 @@
     .badge-running  { background: #dbeafe; color: #1e40af; }
     .badge-done     { background: #dcfce7; color: #166534; }
     .badge-error    { background: #fee2e2; color: #991b1b; }
+    .badge-indexed    { background: #dcfce7; color: #166534; }
+    .badge-not_indexed { background: #f1f5f9; color: #64748b; }
+    .badge-new_docs   { background: #fff7ed; color: #c2410c; }
     #answer-box { background: #f8f8fc; border-radius: 4px; padding: 10px; font-size: .88rem; white-space: pre-wrap; min-height: 80px; margin-top: 10px; }
     details summary { cursor: pointer; font-size: .85rem; color: #0f3460; margin-top: 8px; }
     .status-msg { font-size: .82rem; color: #555; margin-top: 6px; }
@@ -44,100 +54,124 @@
 </head>
 <body>
 <header>Fujinami RAG</header>
-<main>
+<nav class="tab-bar">
+  <button class="tab-btn active" onclick="switchTab('manage')">Manage</button>
+  <button class="tab-btn" onclick="switchTab('query')">Query</button>
+</nav>
 
-  <!-- ===== Collections ===== -->
-  <section id="panel-collections">
-    <h2>Collections</h2>
-    <table id="tbl-collections">
-      <thead><tr><th>Name</th><th>Docs</th><th></th></tr></thead>
-      <tbody></tbody>
-    </table>
-    <div class="form-row">
-      <div>
-        <label>New collection name</label>
-        <input type="text" id="inp-col-name" placeholder="my-collection" />
-      </div>
-      <button class="btn-primary" onclick="createCollection()">Create</button>
-    </div>
-    <p class="status-msg" id="col-status"></p>
-  </section>
+<!-- ===== Tab: Manage ===== -->
+<div id="tab-manage" class="tab-panel active">
+  <main>
 
-  <!-- ===== Documents ===== -->
-  <section id="panel-documents">
-    <h2>Documents</h2>
-    <div class="form-row">
-      <div>
-        <label>Active collection</label>
-        <select id="sel-doc-col" onchange="loadDocuments()"></select>
-      </div>
-    </div>
-    <table id="tbl-documents" style="margin-top:10px">
-      <thead><tr><th>Filename</th><th>Size</th><th></th></tr></thead>
-      <tbody></tbody>
-    </table>
-    <div class="form-row">
-      <div>
-        <label>Upload file</label>
-        <input type="file" id="inp-doc-file" />
-      </div>
-      <button class="btn-primary" onclick="uploadDocument()">Upload</button>
-    </div>
-    <p class="status-msg" id="doc-status"></p>
-  </section>
-
-  <!-- ===== Index ===== -->
-  <section id="panel-index">
-    <h2>Index</h2>
-    <div class="form-row">
-      <div>
-        <label>Collection</label>
-        <select id="sel-idx-col"></select>
-      </div>
-      <button class="btn-primary" onclick="triggerIndex()">Run Index</button>
-    </div>
-    <p class="status-msg" id="idx-status"></p>
-    <p id="idx-task-id" style="font-size:.8rem;color:#888;margin-top:4px;word-break:break-all;"></p>
-  </section>
-
-  <!-- ===== Query ===== -->
-  <section id="panel-query">
-    <h2>Query</h2>
-    <div class="form-row">
-      <div>
-        <label>Collection</label>
-        <select id="sel-qry-col"></select>
-      </div>
-    </div>
-    <label style="font-size:.82rem;margin-top:10px;display:block">Query</label>
-    <textarea id="inp-query" placeholder="Ask a question…"></textarea>
-    <div class="form-row" style="margin-top:8px">
-      <div>
-        <label>Method</label>
-        <div class="radio-group">
-          <label><input type="radio" name="qry-method" value="hybrid" checked /> hybrid</label>
-          <label><input type="radio" name="qry-method" value="vector" /> vector</label>
-          <label><input type="radio" name="qry-method" value="global" /> global</label>
-        </div>
-      </div>
-      <div style="flex:0;white-space:nowrap">
-        <label><input type="checkbox" id="chk-stream" /> stream</label>
-      </div>
-      <button class="btn-primary" onclick="submitQuery()">Ask</button>
-    </div>
-    <div id="answer-box"></div>
-    <details id="sources-detail" style="display:none">
-      <summary>Sources</summary>
-      <table id="tbl-sources" style="margin-top:6px">
-        <thead><tr><th>Doc</th><th>Chunk</th><th>Excerpt</th></tr></thead>
+    <!-- ===== Collections ===== -->
+    <section id="panel-collections">
+      <h2>Collections</h2>
+      <table id="tbl-collections">
+        <thead><tr><th>Name</th><th>Docs</th><th>Index</th><th></th></tr></thead>
         <tbody></tbody>
       </table>
-    </details>
-  </section>
+      <div class="form-row">
+        <div>
+          <label>New collection name</label>
+          <input type="text" id="inp-col-name" placeholder="my-collection" />
+        </div>
+        <button class="btn-primary" onclick="createCollection()">Create</button>
+      </div>
+      <p class="status-msg" id="col-status"></p>
+    </section>
 
-</main>
+    <!-- ===== Documents ===== -->
+    <section id="panel-documents">
+      <h2>Documents</h2>
+      <div class="form-row">
+        <div>
+          <label>Active collection</label>
+          <select id="sel-doc-col" onchange="loadDocuments()"></select>
+        </div>
+      </div>
+      <table id="tbl-documents" style="margin-top:10px">
+        <thead><tr><th>Filename</th><th>Size</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="form-row">
+        <div>
+          <label>Upload file</label>
+          <input type="file" id="inp-doc-file" />
+        </div>
+        <button class="btn-primary" onclick="uploadDocument()">Upload</button>
+      </div>
+      <p class="status-msg" id="doc-status"></p>
+    </section>
+
+    <!-- ===== Index ===== -->
+    <section id="panel-index" style="grid-column: 1 / -1">
+      <h2>Index</h2>
+      <div class="form-row">
+        <div>
+          <label>Collection</label>
+          <select id="sel-idx-col"></select>
+        </div>
+        <button class="btn-primary" onclick="triggerIndex()">Run Index</button>
+      </div>
+      <p class="status-msg" id="idx-status"></p>
+      <p id="idx-task-id" style="font-size:.8rem;color:#888;margin-top:4px;word-break:break-all;"></p>
+    </section>
+
+  </main>
+</div>
+
+<!-- ===== Tab: Query ===== -->
+<div id="tab-query" class="tab-panel">
+  <main class="single">
+
+    <section id="panel-query">
+      <h2>Query</h2>
+      <div class="form-row">
+        <div>
+          <label>Collection</label>
+          <select id="sel-qry-col"></select>
+        </div>
+      </div>
+      <label style="font-size:.82rem;margin-top:10px;display:block">Query</label>
+      <textarea id="inp-query" placeholder="Ask a question…"></textarea>
+      <div class="form-row" style="margin-top:8px">
+        <div>
+          <label>Method</label>
+          <div class="radio-group">
+            <label><input type="radio" name="qry-method" value="hybrid" checked /> hybrid</label>
+            <label><input type="radio" name="qry-method" value="vector" /> vector</label>
+            <label><input type="radio" name="qry-method" value="global" /> global</label>
+          </div>
+        </div>
+        <div style="flex:0;white-space:nowrap">
+          <label><input type="checkbox" id="chk-stream" /> stream</label>
+        </div>
+        <button class="btn-primary" onclick="submitQuery()">Ask</button>
+      </div>
+      <div id="answer-box"></div>
+      <details id="sources-detail" style="display:none">
+        <summary>Sources</summary>
+        <table id="tbl-sources" style="margin-top:6px">
+          <thead><tr><th>Doc</th><th>Chunk</th><th>Excerpt</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </details>
+    </section>
+
+  </main>
+</div>
 
 <script>
+/* -----------------------------------------------------------------------
+   Tabs
+----------------------------------------------------------------------- */
+function switchTab(name) {
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  document.querySelector(`.tab-btn[onclick="switchTab('${name}')"]`).classList.add('active');
+}
+
 /* -----------------------------------------------------------------------
    Helpers
 ----------------------------------------------------------------------- */
@@ -180,12 +214,18 @@ async function loadCollections() {
   populateSelects(cols.map(c => c.name));
 }
 
+function indexStatusBadge(status) {
+  const labels = { indexed: 'Indexed', not_indexed: 'Not Indexed', new_docs: 'New Docs' };
+  return `<span class="badge badge-${status}">${labels[status] ?? status}</span>`;
+}
+
 function renderCollectionsTable(cols) {
   const tbody = $('tbl-collections').querySelector('tbody');
   tbody.innerHTML = cols.map(c => `
     <tr>
       <td>${c.name}</td>
       <td>${c.doc_count}</td>
+      <td>${indexStatusBadge(c.index_status)}</td>
       <td style="white-space:nowrap">
         <button class="btn-warn" onclick="renameCollection('${c.name}')">Rename</button>
         <button class="btn-danger" onclick="deleteCollection('${c.name}')">Delete</button>
@@ -296,17 +336,25 @@ async function triggerIndex() {
 }
 
 function pollIndexStatus(col, taskId) {
+  let consecutiveErrors = 0;
+  const MAX_ERRORS = 5;
   _pollTimer = setInterval(async () => {
     try {
       const s = await api('GET', `/collections/${col}/index/${taskId}`);
+      consecutiveErrors = 0;
       $('idx-status').innerHTML = badgeHtml(s.status) + (s.detail ? ` — ${s.detail}` : '');
       if (s.status === 'done' || s.status === 'error') {
         clearInterval(_pollTimer);
         if (s.status === 'done') await loadCollections();
       }
     } catch(e) {
-      $('idx-status').textContent = 'Poll error: ' + e.message;
-      clearInterval(_pollTimer);
+      consecutiveErrors++;
+      if (consecutiveErrors >= MAX_ERRORS) {
+        $('idx-status').textContent = 'Poll error: ' + e.message;
+        clearInterval(_pollTimer);
+      } else {
+        $('idx-status').textContent = `Retrying… (${consecutiveErrors}/${MAX_ERRORS}) — ${e.message}`;
+      }
     }
   }, 2000);
 }

@@ -4,7 +4,7 @@ skip_workflows: []
 llm:
   api_key: "no-api-key-needed"
   type: openai_chat
-  model: qwen3.6:9b
+  model: qwen3.5:9b
   api_base: http://10.68.129.51:8088/v1
   model_supports_json: true
   max_tokens: 4096
@@ -45,7 +45,7 @@ input:
   file_type: text
   base_dir: "../data"
   file_encoding: utf-8
-  file_pattern: ".*\\.txt$"
+  file_pattern: ".*\\.txt$$"
 
 cache:
   type: file
