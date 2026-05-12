@@ -142,7 +142,11 @@ class RagService:
     # Indexing
     # ------------------------------------------------------------------
 
-    async def index_documents(self, documents_dir: str | Path | None = None) -> None:
+    async def index_documents(
+        self,
+        documents_dir: str | Path | None = None,
+        entity_types: list[str] | None = None,
+    ) -> None:
         """
         Incremental indexing pipeline:
 
@@ -189,17 +193,20 @@ class RagService:
 
         if not changed_sources:
             # Only deletions — still need to re-index GraphRAG
+            self._ensure_settings_yaml(entity_types=entity_types)
             await self._run_graphrag_index()
             self._save_manifest(documents_dir)
             return
 
-        # Step 4 — load only changed files
+        # Step 4 — load only changed files (run in thread to avoid blocking the event loop)
         loader = DocumentLoader(
             ollama_base_url=_OLLAMA_BASE_URL,
             vlm_model=_VLM_MODEL,
             request_timeout=_VLM_TIMEOUT,
         )
-        doc_texts = loader.load_directory(documents_dir, files_filter=changed_sources)
+        doc_texts = await asyncio.to_thread(
+            loader.load_directory, documents_dir, files_filter=changed_sources
+        )
 
         if not doc_texts:
             logger.warning("No content loaded for changed sources")
@@ -213,6 +220,7 @@ class RagService:
             logger.info("Wrote %s", txt_path.name)
 
         # Step 6 — GraphRAG indexing
+        self._ensure_settings_yaml(entity_types=entity_types)
         await self._run_graphrag_index()
 
         # Step 7 — add new chunks to LanceDB
@@ -221,7 +229,7 @@ class RagService:
         # Step 8 — persist manifest
         self._save_manifest(documents_dir)
 
-    def _ensure_settings_yaml(self) -> None:
+    def _ensure_settings_yaml(self, entity_types: list[str] | None = None) -> None:
         """Generate a per-collection ``settings.yaml`` from the root template.
 
         Reads ``{root_dir}/ragdata/settings.yaml`` as a template, sets
@@ -237,20 +245,28 @@ class RagService:
             logger.warning("Settings template not found at %s", template_path)
             return
 
-        config = yaml.safe_load(template_path.read_text(encoding="utf-8"))
+        template_text = template_path.read_text(encoding="utf-8")
+        config = yaml.safe_load(template_text)
         target_base_dir = str(self._data_dir.resolve())
 
         dest_path = self._ragdata_dir / "settings.yaml"
         if dest_path.exists():
-            existing = yaml.safe_load(dest_path.read_text(encoding="utf-8"))
-            if existing.get("input", {}).get("base_dir") == target_base_dir:
+            existing_text = dest_path.read_text(encoding="utf-8")
+            existing = yaml.safe_load(existing_text)
+            existing_base_dir = existing.get("input_storage", {}).get("base_dir")
+            # Also check that the existing file has completion_models (3.x format)
+            # to force regeneration when migrating from old graphrag format.
+            has_new_format = bool(existing.get("completion_models"))
+            if existing_base_dir == target_base_dir and has_new_format:
                 logger.info(
                     "settings.yaml for collection '%s' already up to date",
                     self._collection_name,
                 )
                 return
 
-        config.setdefault("input", {})["base_dir"] = target_base_dir
+        config.setdefault("input_storage", {})["base_dir"] = target_base_dir
+        if entity_types is not None:
+            config.setdefault("extract_graph", {})["entity_types"] = entity_types
         self._ragdata_dir.mkdir(parents=True, exist_ok=True)
         dest_path.write_text(yaml.dump(config, allow_unicode=True), encoding="utf-8")
         logger.info(
@@ -263,11 +279,19 @@ class RagService:
         """Run ``graphrag index`` as a subprocess."""
         cmd = [sys.executable, "-m", "graphrag", "index", "--root", str(self._ragdata_dir)]
         logger.info("Running GraphRAG indexer: %s", " ".join(cmd))
+        # Suppress upstream ResourceWarning (aiohttp unclosed sessions from litellm)
+        # and FutureWarning (pandas deprecation in graphrag) — both are noise from
+        # third-party code that we cannot patch directly.
+        env = os.environ.copy()
+        existing_warn = env.get("PYTHONWARNINGS", "")
+        extra = "ignore::ResourceWarning,ignore::FutureWarning"
+        env["PYTHONWARNINGS"] = f"{existing_warn},{extra}" if existing_warn else extra
         result = await asyncio.to_thread(
             subprocess.run,  # nosec B603
             cmd,
             capture_output=True,
             text=True,
+            env=env,
         )
         if result.returncode != 0:
             logger.warning(
@@ -453,7 +477,7 @@ class RagService:
             sys.executable, "-m", "graphrag", "query",
             "--root", str(self._ragdata_dir),
             "--method", method,
-            "--query", query,
+            query,
         ]
         result = await asyncio.to_thread(
             subprocess.run,  # nosec B603

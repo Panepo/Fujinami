@@ -27,6 +27,21 @@ class DocumentInfo(BaseModel):
     size_bytes: int
 
 
+ALL_ENTITY_TYPES = [
+    "organization",
+    "person",
+    "geo",
+    "event",
+    "concept",
+    "technology",
+    "product",
+]
+
+
+class IndexRequest(BaseModel):
+    entity_types: list[str] | None = None
+
+
 class IndexResponse(BaseModel):
     collection: str
     status: str
@@ -35,6 +50,7 @@ class IndexResponse(BaseModel):
 
 class IndexStatusResponse(BaseModel):
     task_id: str
+    collection: str = ""
     status: Literal["pending", "running", "done", "error"]
     detail: str | None = None
 

@@ -113,8 +113,27 @@
         </div>
         <button class="btn-primary" onclick="triggerIndex()">Run Index</button>
       </div>
+      <div style="margin-top:10px">
+        <label style="font-size:.82rem;color:#555">Entity types</label>
+        <div id="entity-types-group" style="display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:5px;font-size:.85rem">
+          <label><input type="checkbox" name="entity-type" value="organization" checked /> organization</label>
+          <label><input type="checkbox" name="entity-type" value="person" checked /> person</label>
+          <label><input type="checkbox" name="entity-type" value="geo" checked /> geo</label>
+          <label><input type="checkbox" name="entity-type" value="event" checked /> event</label>
+          <label><input type="checkbox" name="entity-type" value="concept" checked /> concept</label>
+          <label><input type="checkbox" name="entity-type" value="technology" checked /> technology</label>
+          <label><input type="checkbox" name="entity-type" value="product" checked /> product</label>
+        </div>
+      </div>
       <p class="status-msg" id="idx-status"></p>
       <p id="idx-task-id" style="font-size:.8rem;color:#888;margin-top:4px;word-break:break-all;"></p>
+      <div id="idx-active-jobs" style="display:none;margin-top:12px;border-top:1px solid #eee;padding-top:10px">
+        <p style="font-size:.82rem;font-weight:600;color:#555;margin-bottom:6px">Active indexing jobs</p>
+        <table style="width:100%;border-collapse:collapse;font-size:.85rem">
+          <thead><tr><th style="text-align:left;padding:4px 8px;background:#f8f8fc">Collection</th><th style="text-align:left;padding:4px 8px;background:#f8f8fc">Status</th><th style="text-align:left;padding:4px 8px;background:#f8f8fc">Elapsed</th><th style="text-align:left;padding:4px 8px;background:#f8f8fc"></th>Detail</th></tr></thead>
+          <tbody id="idx-jobs-tbody"></tbody>
+        </table>
+      </div>
     </section>
 
   </main>
@@ -320,40 +339,97 @@ async function deleteDocument(col, filename) {
 /* -----------------------------------------------------------------------
    Index
 ----------------------------------------------------------------------- */
-let _pollTimer = null;
+const _activeJobs = {};   // col → { taskId, status, detail, timer, errors, startedAt }
+
+function fmtElapsed(ms) {
+  const s = Math.floor(ms / 1000);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  const pad = n => String(n).padStart(2, '0');
+  return h > 0 ? `${h}:${pad(m)}:${pad(sec)}` : `${pad(m)}:${pad(sec)}`;
+}
+
+function renderActiveJobs() {
+  const jobs = Object.entries(_activeJobs);
+  const container = $('idx-active-jobs');
+  if (jobs.length === 0) { container.style.display = 'none'; return; }
+  container.style.display = '';
+  const now = Date.now();
+  $('idx-jobs-tbody').innerHTML = jobs.map(([col, j]) => `
+    <tr>
+      <td style="padding:4px 8px">${col}</td>
+      <td style="padding:4px 8px">${badgeHtml(j.status)}</td>
+      <td style="padding:4px 8px;font-variant-numeric:tabular-nums;color:#444">${fmtElapsed(now - j.startedAt)}</td>
+      <td style="padding:4px 8px;color:#666;font-size:.82rem">${j.detail ?? ''}</td>
+    </tr>`).join('');
+}
+
+// Tick the elapsed timers every second
+setInterval(() => { if (Object.keys(_activeJobs).length > 0) renderActiveJobs(); }, 1000);
 
 async function triggerIndex() {
   const col = $('sel-idx-col').value;
   if (!col) return;
-  clearInterval(_pollTimer);
+  const selectedTypes = Array.from(
+    document.querySelectorAll('input[name="entity-type"]:checked')
+  ).map(el => el.value);
+  const entityTypes = selectedTypes.length > 0 ? selectedTypes : null;
+  // cancel any existing poll for this collection
+  if (_activeJobs[col]) { clearInterval(_activeJobs[col].timer); }
   $('idx-status').innerHTML = badgeHtml('pending');
   $('idx-task-id').textContent = '';
+  _activeJobs[col] = { taskId: null, status: 'pending', detail: '', timer: null, errors: 0, startedAt: Date.now() };
+  renderActiveJobs();
   try {
-    const res = await api('POST', `/collections/${col}/index`);
+    const res = await api('POST', `/collections/${col}/index`, { entity_types: entityTypes });
     $('idx-task-id').textContent = 'task_id: ' + res.task_id;
+    _activeJobs[col].taskId = res.task_id;
     pollIndexStatus(col, res.task_id);
-  } catch(e) { $('idx-status').textContent = 'Error: ' + e.message; }
+  } catch(e) {
+    $('idx-status').textContent = 'Error: ' + e.message;
+    delete _activeJobs[col];
+    renderActiveJobs();
+  }
 }
 
 function pollIndexStatus(col, taskId) {
-  let consecutiveErrors = 0;
   const MAX_ERRORS = 5;
-  _pollTimer = setInterval(async () => {
+  const job = _activeJobs[col];
+  job.timer = setInterval(async () => {
     try {
       const s = await api('GET', `/collections/${col}/index/${taskId}`);
-      consecutiveErrors = 0;
-      $('idx-status').innerHTML = badgeHtml(s.status) + (s.detail ? ` — ${s.detail}` : '');
+      job.errors = 0;
+      job.status = s.status;
+      job.detail = s.detail ?? '';
+      // update main status bar only if this col is the currently selected one
+      if ($('sel-idx-col').value === col && s.status !== 'done' && s.status !== 'error') {
+        $('idx-status').innerHTML = badgeHtml(s.status) + (s.detail ? ` — ${s.detail}` : '');
+      }
+      renderActiveJobs();
       if (s.status === 'done' || s.status === 'error') {
-        clearInterval(_pollTimer);
+        const elapsed = fmtElapsed(Date.now() - job.startedAt);
+        clearInterval(job.timer);
+        delete _activeJobs[col];
+        renderActiveJobs();
+        if ($('sel-idx-col').value === col) {
+          const extra = s.detail ? ` — ${s.detail}` : '';
+          $('idx-status').innerHTML = badgeHtml(s.status) + extra +
+            ` <span style="font-size:.8rem;color:#888">(took ${elapsed})</span>`;
+        }
         if (s.status === 'done') await loadCollections();
       }
     } catch(e) {
-      consecutiveErrors++;
-      if (consecutiveErrors >= MAX_ERRORS) {
-        $('idx-status').textContent = 'Poll error: ' + e.message;
-        clearInterval(_pollTimer);
+      job.errors++;
+      if (job.errors >= MAX_ERRORS) {
+        if ($('sel-idx-col').value === col)
+          $('idx-status').textContent = 'Poll error: ' + e.message;
+        clearInterval(job.timer);
+        delete _activeJobs[col];
+        renderActiveJobs();
       } else {
-        $('idx-status').textContent = `Retrying… (${consecutiveErrors}/${MAX_ERRORS}) — ${e.message}`;
+        job.detail = `Retrying… (${job.errors}/${MAX_ERRORS})`;
+        renderActiveJobs();
       }
     }
   }, 2000);
@@ -452,7 +528,23 @@ function renderSources(sources) {
 /* -----------------------------------------------------------------------
    Init
 ----------------------------------------------------------------------- */
-loadCollections().then(() => loadDocuments());
+async function resumeActiveTasks() {
+  try {
+    const tasks = await api('GET', '/tasks');
+    for (const t of tasks) {
+      if (!t.collection) continue;
+      // Only resume if not already tracked
+      if (_activeJobs[t.collection]) continue;
+      _activeJobs[t.collection] = { taskId: t.task_id, status: t.status, detail: t.detail ?? '', timer: null, errors: 0, startedAt: Date.now() };
+      pollIndexStatus(t.collection, t.task_id);
+    }
+    renderActiveJobs();
+  } catch(_) {
+    // /tasks endpoint may not be available yet — ignore silently
+  }
+}
+
+loadCollections().then(() => { loadDocuments(); resumeActiveTasks(); });
 </script>
 </body>
 </html>

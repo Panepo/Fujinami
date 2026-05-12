@@ -30,6 +30,7 @@ from models import (
     CollectionInfo,
     CollectionRenameRequest,
     DocumentInfo,
+    IndexRequest,
     IndexResponse,
     IndexStatusResponse,
     QueryRequest,
@@ -253,10 +254,10 @@ async def delete_document(name: str, filename: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _run_index(task_id: str, rag: RagService) -> None:
+async def _run_index(task_id: str, rag: RagService, entity_types: list[str] | None = None) -> None:
     _tasks[task_id].status = "running"
     try:
-        await rag.index_documents()
+        await rag.index_documents(entity_types=entity_types)
         _tasks[task_id].status = "done"
     except Exception as exc:  # noqa: BLE001
         _tasks[task_id].status = "error"
@@ -264,12 +265,26 @@ async def _run_index(task_id: str, rag: RagService) -> None:
 
 
 @app.post("/collections/{name}/index", response_model=IndexResponse, status_code=202)
-async def trigger_index(name: str, background_tasks: BackgroundTasks) -> IndexResponse:
+async def trigger_index(
+    name: str,
+    background_tasks: BackgroundTasks,
+    body: IndexRequest | None = None,
+) -> IndexResponse:
     rag = _get_service(name)
+    entity_types = (body.entity_types if body else None) or None
     task_id = str(uuid.uuid4())
-    _tasks[task_id] = IndexStatusResponse(task_id=task_id, status="pending")
-    background_tasks.add_task(_run_index, task_id, rag)
+    _tasks[task_id] = IndexStatusResponse(task_id=task_id, collection=name, status="pending")
+    background_tasks.add_task(_run_index, task_id, rag, entity_types)
     return IndexResponse(collection=name, status="pending", task_id=task_id)
+
+
+@app.get("/tasks", response_model=list[IndexStatusResponse])
+async def list_tasks() -> list[IndexStatusResponse]:
+    """Return all tasks that are still pending or running."""
+    return [
+        t for t in _tasks.values()
+        if t.status in {"pending", "running"}
+    ]
 
 
 @app.get("/collections/{name}/index/{task_id}", response_model=IndexStatusResponse)
