@@ -45,7 +45,15 @@
     .badge-not_indexed { background: #f1f5f9; color: #64748b; }
     .badge-new_docs   { background: #fff7ed; color: #c2410c; }
     #answer-box { background: #f8f8fc; border-radius: 4px; padding: 10px; font-size: .88rem; white-space: pre-wrap; min-height: 80px; margin-top: 10px; }
+    #query-stats { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 6px; font-size: .78rem; color: #64748b; min-height: 1.1em; }
+    #query-stats strong { color: #334155; font-variant-numeric: tabular-nums; }
     details summary { cursor: pointer; font-size: .85rem; color: #0f3460; margin-top: 8px; }
+    .chunk-item { border: 1px solid #e2e8f0; border-radius: 6px; margin-top: 8px; overflow: hidden; }
+    .chunk-header { background: #f1f5f9; padding: 6px 10px; display: flex; justify-content: space-between; align-items: center; cursor: pointer; user-select: none; font-size: .82rem; font-weight: 600; color: #334155; }
+    .chunk-header:hover { background: #e2e8f0; }
+    .chunk-body { display: none; padding: 8px 10px; font-size: .82rem; white-space: pre-wrap; color: #1e293b; background: #fff; border-top: 1px solid #e2e8f0; }
+    .chunk-item.open .chunk-body { display: block; }
+    .graphrag-box { background: #fafaf0; border: 1px solid #e2d96e; border-radius: 6px; padding: 8px 10px; font-size: .82rem; white-space: pre-wrap; color: #1e293b; margin-top: 8px; max-height: 300px; overflow-y: auto; }
     .status-msg { font-size: .82rem; color: #555; margin-top: 6px; }
     .radio-group { display: flex; gap: 12px; align-items: center; margin-top: 4px; font-size: .85rem; }
     .radio-group label { display: flex; align-items: center; gap: 4px; }
@@ -123,6 +131,8 @@
           <label><input type="checkbox" name="entity-type" value="concept" checked /> concept</label>
           <label><input type="checkbox" name="entity-type" value="technology" checked /> technology</label>
           <label><input type="checkbox" name="entity-type" value="product" checked /> product</label>
+          <label><input type="checkbox" name="entity-type" value="process" checked /> process</label>
+          <label><input type="checkbox" name="entity-type" value="system" checked /> system</label>
         </div>
       </div>
       <p class="status-msg" id="idx-status"></p>
@@ -168,6 +178,15 @@
         <button class="btn-primary" onclick="submitQuery()">Ask</button>
       </div>
       <div id="answer-box"></div>
+      <div id="query-stats"></div>
+      <details id="context-detail" style="display:none;margin-top:10px">
+        <summary>Context sent to LLM</summary>
+        <div id="context-chunks-list" style="margin-top:6px"></div>
+        <div id="graphrag-context-wrap" style="display:none;margin-top:10px">
+          <p style="font-size:.8rem;font-weight:600;color:#555;margin-bottom:4px">GraphRAG context</p>
+          <div id="graphrag-context-box" class="graphrag-box"></div>
+        </div>
+      </details>
       <details id="sources-detail" style="display:none">
         <summary>Sources</summary>
         <table id="tbl-sources" style="margin-top:6px">
@@ -340,6 +359,7 @@ async function deleteDocument(col, filename) {
    Index
 ----------------------------------------------------------------------- */
 const _activeJobs = {};   // col → { taskId, status, detail, timer, errors, startedAt }
+let _queryStart = 0;
 
 function fmtElapsed(ms) {
   const s = Math.floor(ms / 1000);
@@ -438,6 +458,55 @@ function pollIndexStatus(col, taskId) {
 /* -----------------------------------------------------------------------
    Query
 ----------------------------------------------------------------------- */
+function fmtMs(ms) {
+  return ms < 1000 ? ms + ' ms' : (ms / 1000).toFixed(2) + ' s';
+}
+
+function showQueryStats(firstMs, totalMs, words) {
+  const wps = totalMs > 0 ? (words / (totalMs / 1000)).toFixed(1) : '—';
+  $('query-stats').innerHTML =
+    `<span>First response: <strong>${fmtMs(firstMs)}</strong></span>` +
+    `<span>Total time: <strong>${fmtMs(totalMs)}</strong></span>` +
+    `<span>Speed: <strong>${wps} w/s</strong></span>`;
+}
+
+function clearContextPanel() {
+  $('context-chunks-list').innerHTML = '';
+  $('graphrag-context-box').textContent = '';
+  $('graphrag-context-wrap').style.display = 'none';
+  $('context-detail').style.display = 'none';
+  $('context-detail').open = false;
+}
+
+function renderContextChunks(chunks) {
+  const list = $('context-chunks-list');
+  list.innerHTML = '';
+  if (!chunks || chunks.length === 0) return;
+  chunks.forEach((c, i) => {
+    const item = document.createElement('div');
+    item.className = 'chunk-item';
+    item.innerHTML = `
+      <div class="chunk-header" onclick="this.parentElement.classList.toggle('open')">
+        <span>#${i + 1} — ${c.doc_id} &nbsp;<span style="font-weight:400;color:#64748b">(chunk ${c.chunk_index})</span></span>
+        <span style="color:#94a3b8;font-size:.78rem">${c.full_text ? c.full_text.length : c.excerpt.length} chars ▾</span>
+      </div>
+      <div class="chunk-body">${escHtml(c.full_text || c.excerpt)}</div>`;
+    list.appendChild(item);
+  });
+  $('context-detail').style.display = '';
+}
+
+function renderGraphragContext(text) {
+  if (!text) return;
+  $('graphrag-context-box').textContent = text;
+  $('graphrag-context-wrap').style.display = '';
+  $('context-detail').style.display = '';
+}
+
+function escHtml(str) {
+  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
 async function submitQuery() {
   const col = $('sel-qry-col').value;
   const query = $('inp-query').value.trim();
@@ -445,9 +514,12 @@ async function submitQuery() {
   const stream = $('chk-stream').checked;
   if (!col || !query) return;
 
+  _queryStart = Date.now();
   $('answer-box').textContent = '';
+  $('query-stats').innerHTML = '';
   $('sources-detail').style.display = 'none';
   $('tbl-sources').querySelector('tbody').innerHTML = '';
+  clearContextPanel();
 
   if (stream) {
     await streamQuery(col, query, method);
@@ -459,15 +531,23 @@ async function submitQuery() {
 async function nonStreamQuery(col, query, method) {
   try {
     const res = await api('POST', `/collections/${col}/query`, { query, method, stream: false });
+    const totalMs = Date.now() - _queryStart;
     $('answer-box').textContent = res.answer;
+    const words = res.answer.trim().split(/\s+/).filter(Boolean).length;
+    showQueryStats(totalMs, totalMs, words);
     if (res.sources && res.sources.length > 0) {
+      renderContextChunks(res.sources);
       renderSources(res.sources);
+    }
+    if (res.graphrag_context) {
+      renderGraphragContext(res.graphrag_context);
     }
   } catch(e) { $('answer-box').textContent = 'Error: ' + e.message; }
 }
 
 async function streamQuery(col, query, method) {
   let answer = '';
+  let firstTokenMs = null;
   const box = $('answer-box');
   box.textContent = '';
 
@@ -504,13 +584,21 @@ async function streamQuery(col, query, method) {
           else if (line.startsWith('data: ')) data = line.slice(6).trim();
         }
         if (eventType === 'token') {
+          if (firstTokenMs === null) firstTokenMs = Date.now() - _queryStart;
           try { answer += JSON.parse(data); } catch(_) { answer += data; }
           box.textContent = answer;
+        } else if (eventType === 'chunks') {
+          try { renderContextChunks(JSON.parse(data)); } catch(_) {}
+        } else if (eventType === 'graphrag') {
+          try { renderGraphragContext(JSON.parse(data)); } catch(_) {}
         } else if (eventType === 'sources') {
           try { renderSources(JSON.parse(data)); } catch(_) {}
         }
       }
     }
+    const totalMs = Date.now() - _queryStart;
+    const words = answer.trim().split(/\s+/).filter(Boolean).length;
+    showQueryStats(firstTokenMs ?? totalMs, totalMs, words);
   } catch(e) { box.textContent = 'Error: ' + e.message; }
 }
 

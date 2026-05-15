@@ -66,6 +66,7 @@ class SourceChunk(BaseModel):
     doc_id: str
     chunk_index: int
     excerpt: str
+    full_text: str = ""
 
 
 class QueryResponse(BaseModel):
@@ -73,3 +74,4 @@ class QueryResponse(BaseModel):
     method: str
     answer: str
     sources: list[SourceChunk] | None
+    graphrag_context: str | None = None

@@ -54,12 +54,12 @@ reporting:
 chunking:
   type: tokens
   size: 2000
-  overlap: 200
+  overlap: 100
 
 extract_graph:
   completion_model_id: default_completion_model
-  entity_types: [organization, person, geo, event, concept, technology, product]
-  max_gleanings: 1
+  entity_types: [organization, person, geo, event, concept, technology, product, process, system]
+  max_gleanings: 0
 
 summarize_descriptions:
   completion_model_id: default_completion_model
