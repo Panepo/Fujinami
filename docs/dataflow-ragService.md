@@ -21,23 +21,23 @@
 │                            │           └─────────────────┘  │
 └────────────────────────────┼────────────────────────────────┘
                              │ HTTP (OpenAI-compatible API)
-                             ▼
-              ┌──────────────────────────────┐
-              │  Ollama Server               │
-              │  http://10.68.129.51:8088    │
-              │                              │
-              │  ┌──────────────────────┐    │
-              │  │  qwen3.6:9b (LLM)    │    │
-              │  └──────────────────────┘    │
-              │  ┌──────────────────────┐    │
-              │  │  locusai/all-minilm  │    │
-              │  │  -l6-v2 (Embeddings) │    │
-              │  └──────────────────────┘    │
-              │  ┌──────────────────────┐    │
-              │  │  llava:7b / minicpm-v│    │
-              │  │  (VLM – images)      │    │
-              │  └──────────────────────┘    │
-              └──────────────────────────────┘
+               ┌─────────────┴──────────────┐
+               │                            │
+               ▼                            ▼
+┌──────────────────────────┐  ┌──────────────────────────────┐
+│  OLLAMA_INDEX_URL        │  │  OLLAMA_CHAT_URL             │
+│  http://10.168.3.58:8088 │  │  http://localhost:11434      │
+│  (indexing only)         │  │  (querying + chat)           │
+│                          │  │                              │
+│  ┌────────────────────┐  │  │  ┌──────────────────────┐   │
+│  │  bge-m3:567m       │  │  │  │  llama3.2:3b (Chat)  │   │
+│  │  (index embeddings)│  │  │  └──────────────────────┘   │
+│  └────────────────────┘  │  │  ┌──────────────────────┐   │
+│  ┌────────────────────┐  │  │  │  bge-m3:567m         │   │
+│  │  llava:7b          │  │  │  │  (query embeddings)  │   │
+│  │  (VLM – images)    │  │  │  └──────────────────────┘   │
+│  └────────────────────┘  │  └──────────────────────────────┘
+└──────────────────────────┘
 ```
 
 ---
@@ -82,7 +82,7 @@ User calls: await rag.index_documents("./documents")
 │  (subprocess)   │   │                                      │
 │                 │   │  Chunk text → OllamaTextEmbedding    │
 │  graphrag index │   │  GenerationService                   │
-│  --root         │   │  (locusai/all-minilm-l6-v2)          │
+│  --root         │   │  bge-m3:567m @ OLLAMA_INDEX_URL      │
 │  ./ragdata      │   │                                      │
 │                 │   │  → Upsert chunks into LanceDB        │
 │  Produces:      │   │    ./ragdata/lancedb/ (on disk)      │
@@ -212,7 +212,7 @@ _build_vlm_prompt(type_tag, surrounding_text)
   prompt_str
        │
        ▼
-POST http://10.68.129.51:8088/api/chat
+POST http://10.168.3.58:8088/api/chat  (OLLAMA_INDEX_URL)
   body: { model: "llava:7b",
           messages: [{ role: "user",
                        content: [
@@ -246,9 +246,10 @@ User query string
   │  │                       │  │                         │ │
   │  │  query                │  │  query                  │ │
   │  │    ──▶ embed (Ollama) │  │    ──▶ graphrag query   │ │
-  │  │         all-minilm    │  │         --method local  │ │
-  │  │    ──▶ cosine sim     │  │         --root ./ragdata│ │
-  │  │         LanceDB       │  │                         │ │
+  │  │    bge-m3:567m        │  │         --method local  │ │
+  │  │    OLLAMA_CHAT_URL    │  │         --root ./ragdata│ │
+  │  │    ──▶ cosine sim     │  │  (query_embedding_model │ │
+  │  │         LanceDB       │  │   @ OLLAMA_CHAT_URL)    │ │
   │  │    ──▶ top-k chunks   │  │    ──▶ entity/community │ │
   │  │                       │  │         context strings │ │
   │  └──────────┬────────────┘  └────────────┬────────────┘ │
@@ -267,8 +268,8 @@ User query string
                                │
                                ▼
                   OllamaChatCompletionService
-                  model: qwen3.6:9b
-                  POST http://10.68.129.51:8088/v1/chat/completions
+                  model: llama3.2:3b  (CHAT_MODEL)
+                  POST http://localhost:11434/v1/chat/completions
                                │
                                ▼
                         final response str
@@ -282,11 +283,11 @@ User query string
 User query string
        │
        ▼
-OllamaTextEmbeddingGenerationService  (all-minilm-l6-v2)
-  POST http://10.68.129.51:8088/v1/embeddings
+OllamaTextEmbeddingGenerationService  (bge-m3:567m)
+  POST http://localhost:11434/v1/embeddings  (OLLAMA_CHAT_URL)
        │
        ▼
-  query_vector  [384-dim float32[384] array]
+  query_vector
        │
        ▼
 LanceDB  ./ragdata/lancedb/  table: "documents"
@@ -301,8 +302,8 @@ LanceDB  ./ragdata/lancedb/  table: "documents"
   assembled context string
        │
        ▼
-OllamaChatCompletionService  (qwen3.6:9b)
-  POST http://10.68.129.51:8088/v1/chat/completions
+OllamaChatCompletionService  (llama3.2:3b)
+  POST http://localhost:11434/v1/chat/completions  (OLLAMA_CHAT_URL)
        │
        ▼
   final response str
@@ -326,8 +327,8 @@ graphrag query subprocess
   community-level summary context
        │
        ▼
-OllamaChatCompletionService  (qwen3.6:9b)
-  POST http://10.68.129.51:8088/v1/chat/completions
+OllamaChatCompletionService  (llama3.2:3b)
+  POST http://localhost:11434/v1/chat/completions  (OLLAMA_CHAT_URL)
        │
        ▼
   broad thematic response str
@@ -351,24 +352,27 @@ OllamaChatCompletionService  (qwen3.6:9b)
 | `id` | `string` | `{filename}#{chunk_index}` — unique chunk key |
 | `doc_id` | `string` | Source filename — upsert/delete key |
 | `text` | `string` | Raw chunk text returned in search results |
-| `vector` | `fixed_size_list<float32>[384]` | Embedding dimension matches `all-minilm-l6-v2` |
+| `vector` | `fixed_size_list<float32>[384]` | Embedding dimension matches `bge-m3:567m` |
 | `metadata` | `string` | JSON: `{"page": ..., "source": ..., "chunk_index": ...}` |
 
 ---
 
 ## 5. External Service Interactions
 
-| Call | Triggered by | Endpoint | Model |
-| :--- | :--- | :--- | :--- |
-| Diagram type detection | `_detect_diagram_type()` | `POST /api/chat` | `llava:7b` (VLM) |
-| Image description | `_describe_image()` | `POST /api/chat` | `llava:7b` (VLM) |
-| GraphRAG LLM (entity extraction, summarisation) | `graphrag index` CLI | `/v1/chat/completions` | `qwen3.6:9b` |
-| GraphRAG embeddings | `graphrag index` CLI | `/v1/embeddings` | `locusai/all-minilm-l6-v2` |
-| SK chunk embedding | `index_documents()` | `/v1/embeddings` | `locusai/all-minilm-l6-v2` |
-| SK query embedding | `vector_search()` / `hybrid_search()` | `/v1/embeddings` | `locusai/all-minilm-l6-v2` |
-| Final LLM response | all search methods | `/v1/chat/completions` | `qwen3.6:9b` |
+| Call | Triggered by | Server | Endpoint | Model |
+| :--- | :--- | :--- | :--- | :--- |
+| Diagram type detection | `_detect_diagram_type()` | `OLLAMA_INDEX_URL` | `POST /api/chat` | `llava:7b` |
+| Image description | `_describe_image()` | `OLLAMA_INDEX_URL` | `POST /api/chat` | `llava:7b` |
+| GraphRAG index completion (entity extraction, summarisation) | `graphrag index` CLI | `OLLAMA_CHAT_URL` | `/v1/chat/completions` | `llama3.2:3b` |
+| GraphRAG index embedding (`indexing_embedding_model`) | `graphrag index` CLI | `OLLAMA_INDEX_URL` | `/v1/embeddings` | `bge-m3:567m` |
+| SK chunk embedding | `index_documents()` | `OLLAMA_INDEX_URL` | `/v1/embeddings` | `bge-m3:567m` |
+| GraphRAG query completion | `graphrag query` CLI | `OLLAMA_CHAT_URL` | `/v1/chat/completions` | `llama3.2:3b` |
+| GraphRAG query embedding (`query_embedding_model`) | `graphrag query` CLI | `OLLAMA_CHAT_URL` | `/v1/embeddings` | `bge-m3:567m` |
+| SK query embedding | `vector_search()` / `hybrid_search()` | `OLLAMA_CHAT_URL` | `/v1/embeddings` | `bge-m3:567m` |
+| SK final LLM response | all search methods | `OLLAMA_CHAT_URL` | `/v1/chat/completions` | `llama3.2:3b` |
 
-All calls target `http://10.68.129.51:8088` using Ollama's OpenAI-compatible REST API.
+- `OLLAMA_INDEX_URL` = `http://10.168.3.58:8088` — remote GPU server (indexing, VLM, index-time embeddings)
+- `OLLAMA_CHAT_URL` = `http://localhost:11434` — local server (all query-time calls)
 
 ---
 

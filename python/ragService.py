@@ -3,9 +3,10 @@ RagService — hybrid RAG using Semantic Kernel + LanceDB + Microsoft GraphRAG.
 
 Stack
 -----
-- LLM / Embeddings : Ollama (qwen3.5:9b / locusai/all-minilm-l6-v2:latest)
-- Vector store      : LanceDB (persistent, embedded, file-based)
-- Graph engine      : Microsoft GraphRAG (CLI subprocess)
+- Indexing LLM / VLM / Embeddings  : Ollama on OLLAMA_INDEX_URL (gemma4:e4b / llava:7b / bge-m3:567m)
+- Chat LLM                         : Ollama on OLLAMA_CHAT_URL (llama3.2:3b)
+- Vector store                     : LanceDB (persistent, embedded, file-based)
+- Graph engine                     : Microsoft GraphRAG (CLI subprocess)
 """
 from __future__ import annotations
 
@@ -50,7 +51,8 @@ _TOP_K = 5
 # Ollama service configuration
 # ---------------------------------------------------------------------------
 
-_OLLAMA_BASE_URL = os.environ["OLLAMA_BASE_URL"]
+_OLLAMA_INDEX_URL = os.environ["OLLAMA_INDEX_URL"]
+_OLLAMA_CHAT_URL = os.environ["OLLAMA_CHAT_URL"]
 _CHAT_MODEL = os.environ["CHAT_MODEL"]
 _EMBEDDING_MODEL = os.environ["EMBEDDING_MODEL"]
 _VLM_MODEL = os.environ["VLM_MODEL"]
@@ -108,17 +110,25 @@ class RagService:
 
         self._chat_service = OllamaChatCompletion(
             ai_model_id=_CHAT_MODEL,
-            host=_OLLAMA_BASE_URL,
+            host=_OLLAMA_CHAT_URL,
             service_id="chat",
         )
+        # Used at index time to embed documents
         self._embedding_service = OllamaTextEmbedding(
             ai_model_id=_EMBEDDING_MODEL,
-            host=_OLLAMA_BASE_URL,
+            host=_OLLAMA_INDEX_URL,
             service_id="embedding",
+        )
+        # Used at query time to embed the search query
+        self._query_embedding_service = OllamaTextEmbedding(
+            ai_model_id=_EMBEDDING_MODEL,
+            host=_OLLAMA_CHAT_URL,
+            service_id="query_embedding",
         )
 
         self._kernel.add_service(self._chat_service)
         self._kernel.add_service(self._embedding_service)
+        self._kernel.add_service(self._query_embedding_service)
 
         # --- LanceDB setup ---
         import lancedb  # noqa: PLC0415
@@ -200,7 +210,7 @@ class RagService:
 
         # Step 4 — load only changed files (run in thread to avoid blocking the event loop)
         loader = DocumentLoader(
-            ollama_base_url=_OLLAMA_BASE_URL,
+            ollama_base_url=_OLLAMA_INDEX_URL,
             vlm_model=_VLM_MODEL,
             request_timeout=_VLM_TIMEOUT,
         )
@@ -250,6 +260,8 @@ class RagService:
         target_base_dir = str(self._data_dir.resolve())
 
         dest_path = self._ragdata_dir / "settings.yaml"
+        chat_api_base = f"{_OLLAMA_CHAT_URL}/v1"
+        index_api_base = f"{_OLLAMA_INDEX_URL}/v1"
         if dest_path.exists():
             existing_text = dest_path.read_text(encoding="utf-8")
             existing = yaml.safe_load(existing_text)
@@ -257,7 +269,28 @@ class RagService:
             # Also check that the existing file has completion_models (3.x format)
             # to force regeneration when migrating from old graphrag format.
             has_new_format = bool(existing.get("completion_models"))
-            if existing_base_dir == target_base_dir and has_new_format:
+            existing_completion_base = (
+                existing.get("completion_models", {})
+                .get("default_completion_model", {})
+                .get("api_base")
+            )
+            existing_index_emb_base = (
+                existing.get("embedding_models", {})
+                .get("indexing_embedding_model", {})
+                .get("api_base")
+            )
+            existing_query_emb_base = (
+                existing.get("embedding_models", {})
+                .get("query_embedding_model", {})
+                .get("api_base")
+            )
+            if (
+                existing_base_dir == target_base_dir
+                and has_new_format
+                and existing_completion_base == chat_api_base
+                and existing_index_emb_base == index_api_base
+                and existing_query_emb_base == chat_api_base
+            ):
                 logger.info(
                     "settings.yaml for collection '%s' already up to date",
                     self._collection_name,
@@ -265,6 +298,18 @@ class RagService:
                 return
 
         config.setdefault("input_storage", {})["base_dir"] = target_base_dir
+        # Use OLLAMA_CHAT_URL for GraphRAG query (response generation)
+        config.setdefault("completion_models", {}).setdefault(
+            "default_completion_model", {}
+        ).update({"api_base": chat_api_base, "model": _CHAT_MODEL})
+        # Indexing embeddings → OLLAMA_INDEX_URL (remote GPU server)
+        config.setdefault("embedding_models", {}).setdefault(
+            "indexing_embedding_model", {}
+        )["api_base"] = index_api_base
+        # Query embeddings → OLLAMA_CHAT_URL (local server)
+        config.setdefault("embedding_models", {}).setdefault(
+            "query_embedding_model", {}
+        )["api_base"] = chat_api_base
         if entity_types is not None:
             config.setdefault("extract_graph", {})["entity_types"] = entity_types
         self._ragdata_dir.mkdir(parents=True, exist_ok=True)
@@ -463,7 +508,7 @@ class RagService:
         """Return raw LanceDB rows for *query* (keys: doc_id, text, metadata)."""
         if self._table is None:
             return []
-        query_emb = await self._embedding_service.generate_embeddings([query])
+        query_emb = await self._query_embedding_service.generate_embeddings([query])
         vector = (
             query_emb[0].tolist()
             if hasattr(query_emb[0], "tolist")
