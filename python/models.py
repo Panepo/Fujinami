@@ -35,6 +35,8 @@ ALL_ENTITY_TYPES = [
     "concept",
     "technology",
     "product",
+    "process",
+    "system",
 ]
 
 

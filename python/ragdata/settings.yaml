@@ -7,7 +7,7 @@ completion_models:
   default_completion_model:
     model_provider: openai
     model: qwen3.5:9b
-    api_base: http://10.68.129.51:8088/v1
+    api_base: http://10.168.3.58:8088/v1
     api_key: no-api-key-needed
     auth_method: api_key
     call_args:
@@ -23,7 +23,7 @@ embedding_models:
   default_embedding_model:
     model_provider: openai
     model: bge-m3:567m
-    api_base: http://10.68.129.51:8088/v1
+    api_base: http://10.168.3.58:8088/v1
     api_key: no-api-key-needed
     auth_method: api_key
     call_args:
@@ -79,9 +79,14 @@ community_reports:
 embed_text:
   embedding_model_id: default_embedding_model
   names:
-    - text_unit.text
-    - entity.description
-    - community.full_content
+    - text_unit_text
+    - entity_description
+    - community_full_content
+
+vector_store:
+  type: lancedb
+  db_uri: output/lancedb
+  vector_size: 1024
 
 snapshots:
   graphml: false

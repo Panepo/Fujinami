@@ -73,7 +73,7 @@ class DocumentLoader:
     Parameters
     ----------
     ollama_base_url:
-        Base URL of the Ollama server (e.g. ``"http://10.68.129.51:8088"``).
+        Base URL of the Ollama server (e.g. ``"http://10.168.3.58:8088"``).
     vlm_model:
         Ollama VLM model name to use for image description.
     request_timeout:
@@ -82,7 +82,7 @@ class DocumentLoader:
 
     def __init__(
         self,
-        ollama_base_url: str = "http://10.68.129.51:8088",
+        ollama_base_url: str = "http://10.168.3.58:8088",
         vlm_model: str = "llava:7b",
         request_timeout: float = 60.0,
     ) -> None:
