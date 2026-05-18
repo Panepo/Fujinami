@@ -587,6 +587,7 @@ async function streamQuery(col, query, method) {
           if (firstTokenMs === null) firstTokenMs = Date.now() - _queryStart;
           try { answer += JSON.parse(data); } catch(_) { answer += data; }
           box.textContent = answer;
+          await new Promise(r => setTimeout(r, 0));
         } else if (eventType === 'chunks') {
           try { renderContextChunks(JSON.parse(data)); } catch(_) {}
         } else if (eventType === 'graphrag') {

@@ -6,8 +6,8 @@ concurrent_requests: 1
 completion_models:
   default_completion_model:
     model_provider: openai
-    model: qwen3.5:9b
-    api_base: http://10.168.3.58:8088/v1
+    model: llama3.2:3b          # overridden at runtime by CHAT_MODEL
+    api_base: http://localhost:11434/v1  # overridden at runtime by OLLAMA_CHAT_URL
     api_key: no-api-key-needed
     auth_method: api_key
     call_args:
@@ -20,10 +20,21 @@ completion_models:
       max_retries: 10
 
 embedding_models:
-  default_embedding_model:
+  indexing_embedding_model:
     model_provider: openai
     model: bge-m3:567m
-    api_base: http://10.168.3.58:8088/v1
+    api_base: http://10.168.3.58:8088/v1  # overridden at runtime by OLLAMA_INDEX_URL
+    api_key: no-api-key-needed
+    auth_method: api_key
+    call_args:
+      timeout: 180.0
+    retry:
+      type: exponential_backoff
+      max_retries: 10
+  query_embedding_model:
+    model_provider: openai
+    model: bge-m3:567m
+    api_base: http://localhost:11434/v1   # overridden at runtime by OLLAMA_CHAT_URL
     api_key: no-api-key-needed
     auth_method: api_key
     call_args:
@@ -77,7 +88,7 @@ community_reports:
   max_input_length: 8000
 
 embed_text:
-  embedding_model_id: default_embedding_model
+  embedding_model_id: indexing_embedding_model
   names:
     - text_unit_text
     - entity_description
@@ -94,7 +105,7 @@ snapshots:
 
 local_search:
   completion_model_id: default_completion_model
-  embedding_model_id: default_embedding_model
+  embedding_model_id: query_embedding_model
   text_unit_prop: 0.5
   community_prop: 0.1
   conversation_history_max_turns: 5
