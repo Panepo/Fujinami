@@ -24,7 +24,7 @@ from dotenv import load_dotenv
 
 from document_loader import DocumentLoader, SUPPORTED_EXTENSIONS
 
-load_dotenv(Path(__file__).parent.parent / ".env")
+load_dotenv(Path(__file__).parent / ".env")
 
 logger = logging.getLogger(__name__)
 

@@ -1,5 +1,5 @@
 """
-FastAPI HTTP server for the Fujinami RAG system.
+FastAPI HTTP server for the RAG system.
 
 Run from the workspace root:
     uvicorn python.api:app --reload
@@ -21,7 +21,10 @@ _pkg_dir = Path(__file__).parent
 if str(_pkg_dir) not in sys.path:
     sys.path.insert(0, str(_pkg_dir))
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, UploadFile
+import csv
+import io
+
+from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -30,6 +33,10 @@ from models import (
     CollectionInfo,
     CollectionRenameRequest,
     DocumentInfo,
+    EvaluateBatchResponse,
+    EvaluateBatchSampleResult,
+    EvaluateSingleRequest,
+    EvaluateSingleResponse,
     IndexRequest,
     IndexResponse,
     IndexStatusResponse,
@@ -70,7 +77,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 # App
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="Fujinami RAG API", lifespan=lifespan)
+app = FastAPI(title="RAG API", lifespan=lifespan)
 
 _static_dir = _ROOT_DIR / "static"
 if _static_dir.exists():
@@ -414,3 +421,101 @@ async def query_collection(name: str, body: QueryRequest):
         sources=sources,
         graphrag_context=graphrag_context,
     )
+
+
+# ---------------------------------------------------------------------------
+# RAGAS evaluation endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/metrics")
+async def list_metrics() -> list[dict]:
+    """Return the available RAGAS metric definitions."""
+    from ragas_runner import registry_as_list  # noqa: PLC0415
+
+    return registry_as_list()
+
+
+@app.post("/api/evaluate/single", response_model=EvaluateSingleResponse)
+async def evaluate_single(body: EvaluateSingleRequest) -> EvaluateSingleResponse:
+    """Run RAGAS evaluation for a single query/response/context sample."""
+    from ragas_runner import run_evaluation  # noqa: PLC0415
+
+    sample = {
+        "user_input": body.user_input,
+        "retrieved_contexts": body.retrieved_contexts,
+        "response": body.response,
+        "reference": body.reference,
+    }
+    # Remove empty optional fields so RAGAS doesn't see them as present-but-empty
+    sample = {k: v for k, v in sample.items() if v not in ("", [])}
+
+    try:
+        scores = await run_evaluation([sample], body.metrics)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    return EvaluateSingleResponse(scores=scores)
+
+
+@app.post("/api/evaluate/batch", response_model=EvaluateBatchResponse)
+async def evaluate_batch(
+    file: UploadFile,
+    metrics: str = Form(...),
+) -> EvaluateBatchResponse:
+    """
+    Run RAGAS evaluation for a batch of samples.
+
+    Accepts a JSON array or CSV file.  The ``metrics`` form field must be a
+    JSON-encoded list of metric IDs.
+    """
+    from ragas_runner import run_evaluation_per_sample  # noqa: PLC0415
+
+    try:
+        metric_ids: list[str] = json.loads(metrics)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail="'metrics' must be a JSON array string") from exc
+
+    content = await file.read()
+    filename = (file.filename or "").lower()
+
+    samples: list[dict] = []
+    if filename.endswith(".json"):
+        try:
+            samples = json.loads(content.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise HTTPException(status_code=422, detail=f"Invalid JSON file: {exc}") from exc
+        if not isinstance(samples, list):
+            raise HTTPException(status_code=422, detail="JSON file must contain an array of objects")
+    elif filename.endswith(".csv"):
+        try:
+            text = content.decode("utf-8")
+            reader = csv.DictReader(io.StringIO(text))
+            for row in reader:
+                sample: dict = dict(row)
+                # retrieved_contexts column may be a JSON array string
+                if "retrieved_contexts" in sample and isinstance(sample["retrieved_contexts"], str):
+                    try:
+                        sample["retrieved_contexts"] = json.loads(sample["retrieved_contexts"])
+                    except json.JSONDecodeError:
+                        # Treat as a single context if not valid JSON
+                        sample["retrieved_contexts"] = [sample["retrieved_contexts"]]
+                samples.append(sample)
+        except (UnicodeDecodeError, csv.Error) as exc:
+            raise HTTPException(status_code=422, detail=f"Invalid CSV file: {exc}") from exc
+    else:
+        raise HTTPException(status_code=422, detail="File must be .json or .csv")
+
+    if not samples:
+        raise HTTPException(status_code=422, detail="File contains no samples")
+
+    try:
+        per_sample_scores = await run_evaluation_per_sample(samples, metric_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    results = [
+        EvaluateBatchSampleResult(sample=s, scores=scores)
+        for s, scores in zip(samples, per_sample_scores)
+    ]
+    return EvaluateBatchResponse(results=results)

@@ -1,5 +1,5 @@
 """
-Pydantic request/response models for the Fujinami FastAPI RAG server.
+Pydantic request/response models for the FastAPI RAG server.
 """
 from __future__ import annotations
 
@@ -77,3 +77,29 @@ class QueryResponse(BaseModel):
     answer: str
     sources: list[SourceChunk] | None
     graphrag_context: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# RAGAS evaluation models
+# ---------------------------------------------------------------------------
+
+
+class EvaluateSingleRequest(BaseModel):
+    user_input: str = ""
+    retrieved_contexts: list[str] = []
+    response: str = ""
+    reference: str = ""
+    metrics: list[str]
+
+
+class EvaluateSingleResponse(BaseModel):
+    scores: dict[str, float | None]
+
+
+class EvaluateBatchSampleResult(BaseModel):
+    sample: dict
+    scores: dict[str, float | None]
+
+
+class EvaluateBatchResponse(BaseModel):
+    results: list[EvaluateBatchSampleResult]

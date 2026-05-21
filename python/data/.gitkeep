@@ -1,2 +1,0 @@
-# Drop .txt, .md, .pdf, .docx, or .doc files here before calling index_documents().
-# This directory is populated automatically by RagService.index_documents().

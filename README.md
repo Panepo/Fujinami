@@ -1,4 +1,4 @@
-# Fujinami
+# Fujinami RAG Service
 
 A hybrid **Retrieval-Augmented Generation (RAG)** system that combines [Microsoft GraphRAG](https://github.com/microsoft/graphrag), [Semantic Kernel](https://github.com/microsoft/semantic-kernel), and [LanceDB](https://lancedb.github.io/lancedb/) to answer questions over your document collections using locally-hosted [Ollama](https://ollama.com/) models.
 
@@ -13,6 +13,7 @@ A hybrid **Retrieval-Augmented Generation (RAG)** system that combines [Microsof
 - **Streaming responses** — optional token-by-token streaming on query endpoints
 - **Built-in Web UI** — zero-configuration browser interface served at `/`
 - **Fully local** — all LLM, embedding, and VLM calls go to Ollama; no cloud APIs required
+- **RAGAS evaluation** — score RAG responses against 10 built-in metrics (Faithfulness, Context Recall, Context Precision, Response Relevancy, Factual Correctness, Noise Sensitivity, Semantic Similarity, BLEU, ROUGE) using a locally-hosted LLM
 
 ---
 
@@ -76,21 +77,14 @@ ollama pull llava:7b
 
 ## Setup
 
-### 1. Clone and enter the repo
-
-```sh
-git clone https://github.com/your-org/Fujinami.git
-cd Fujinami
-```
-
-### 2. Create a `.env` file
+### 1. Create a `.env` file
 
 ```env
 # Remote Ollama server used during indexing (embeddings + VLM)
-OLLAMA_INDEX_URL=http://10.168.3.58:8088
+OLLAMA_INDEX_URL=
 
 # Local Ollama server used at query time
-OLLAMA_CHAT_URL=http://localhost:11434
+OLLAMA_CHAT_URL=
 
 # Model names
 CHAT_MODEL=llama3.2:3b
@@ -99,31 +93,31 @@ VLM_MODEL=llava:7b
 
 # Optional: VLM HTTP timeout in seconds (default 180)
 VLM_TIMEOUT=180
+
+# Model used for RAGAS evaluation (needs large context window, e.g. gemma4:e4b)
+RAGAS_MODEL=gemma4:e4b
+
+# Optional: Ollama request timeout for RAGAS evaluation in seconds (default 1800)
+OLLAMA_TIMEOUT=1800
 ```
 
 > If you only have one Ollama instance, set both `OLLAMA_INDEX_URL` and `OLLAMA_CHAT_URL` to the same URL.
 
-### 3. Create the virtual environment and install dependencies
+### 2. Create the virtual environment and install dependencies
 
-```powershell
-cd python
-poe sync      # creates .venv\fujinami_env312 and runs uv sync
-poe install   # pip-installs all Python dependencies
+```sh
+# Install uv (once)
+pip install uv
+
+# Create .venv and install dependencies
+uv venv
+uv pip install -r requirements.txt
 ```
 
-Or manually:
+### 3. Start the development server
 
-```powershell
-$env:UV_PROJECT_ENVIRONMENT = '.venv\fujinami_env312'
-uv sync
-.venv\fujinami_env312\Scripts\Activate.ps1
-python install_dependency.py
-```
-
-### 4. Start the development server
-
-```powershell
-poe dev
+```sh
+uv run poe dev
 # equivalent to: uvicorn api:app --reload
 ```
 
@@ -195,6 +189,47 @@ POST /collections/{name}/query
 
 Response includes `answer`, `sources` (chunk excerpts with doc references), and `graphrag_context`.
 
+#### RAGAS Evaluation
+
+```http
+GET  /api/metrics                  # list available metrics and their required fields
+POST /api/evaluate/single          # evaluate a single sample
+POST /api/evaluate/batch           # evaluate a batch from a JSON or CSV file
+```
+
+**Single evaluation** (`POST /api/evaluate/single`):
+
+```json
+{
+  "user_input": "What are the main roles in the system?",
+  "response": "The main roles are Master, User, and Viewer.",
+  "retrieved_contexts": ["Masters can manage …", "Viewers can only read …"],
+  "reference": "The system has three roles: Master, User, and Viewer.",
+  "metrics": ["faithfulness", "llm_context_recall", "response_relevancy"]
+}
+```
+
+Returns `{ "scores": { "faithfulness": 0.95, "llm_context_recall": 0.88, … } }`.
+
+**Batch evaluation** (`POST /api/evaluate/batch`):
+
+Upload a `.json` (array of sample objects) or `.csv` file via `multipart/form-data` with a `metrics` form field (JSON-encoded list of metric IDs).
+
+**Available metric IDs:**
+
+| ID | Display Name | Required Fields | LLM | Embeddings |
+|---|---|---|---|---|
+| `faithfulness` | Faithfulness | `user_input`, `response`, `retrieved_contexts` | ✓ | |
+| `llm_context_recall` | LLM Context Recall | `user_input`, `retrieved_contexts`, `reference` | ✓ | |
+| `llm_context_precision` | LLM Context Precision | `user_input`, `retrieved_contexts`, `reference` | ✓ | |
+| `context_precision_without_reference` | Context Precision (No Ref) | `user_input`, `response`, `retrieved_contexts` | ✓ | |
+| `response_relevancy` | Response Relevancy | `user_input`, `response` | ✓ | ✓ |
+| `factual_correctness` | Factual Correctness | `response`, `reference` | ✓ | |
+| `noise_sensitivity` | Noise Sensitivity | `user_input`, `retrieved_contexts`, `response`, `reference` | ✓ | |
+| `semantic_similarity` | Semantic Similarity | `response`, `reference` | | ✓ |
+| `bleu_score` | BLEU Score | `response`, `reference` | | |
+| `rouge_score` | ROUGE Score | `response`, `reference` | | |
+
 ---
 
 ## Project Structure
@@ -206,6 +241,7 @@ Fujinami/
 │   ├── api.py                  # FastAPI application and all HTTP endpoints
 │   ├── ragService.py           # RagService: indexing + search logic
 │   ├── document_loader.py      # PDF/DOCX/DOC/TXT loader with VLM image descriptions
+│   ├── ragas_runner.py         # RAGAS metric registry and async evaluation runner
 │   ├── models.py               # Pydantic request/response schemas
 │   ├── install_dependency.py   # Dependency installer script
 │   ├── pyproject.toml          # Project metadata and poe tasks
@@ -250,18 +286,3 @@ Omitting `entity_types` uses the GraphRAG defaults.
 | Unsupported file extension | File rejected at upload with HTTP 422 |
 | `graphrag index` subprocess fails | Indexing task transitions to `error`; detail message returned |
 | Ollama server unreachable | HTTP 500 propagated to API caller |
-
----
-
-## Development
-
-```powershell
-# Activate the venv
-.venv\fujinami_env312\Scripts\Activate.ps1
-
-# Run with auto-reload
-uvicorn api:app --reload --app-dir python
-
-# Check API docs
-start http://localhost:8000/docs
-```

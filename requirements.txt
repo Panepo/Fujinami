@@ -1,0 +1,13 @@
+--pre
+agent-framework
+semantic-kernel[ollama]
+graphrag
+lancedb
+pyarrow
+pypdf
+pymupdf
+python-docx
+pywin32
+ragas>=0.2
+litellm
+openai

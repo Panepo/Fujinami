@@ -1,7 +1,7 @@
 [project]
 name = "fujinami"
 version = "0.1.0"
-description = "Fujinami RAG service with Ollama and GraphRAG"
+description = "RAG service with Ollama and GraphRAG"
 requires-python = ">=3.12"
 dependencies = [
     "agent-framework",
@@ -14,6 +14,9 @@ dependencies = [
     "python-docx",
     "pywin32",
     "poethepoet",
+    "ragas>=0.2",
+    "litellm",
+    "openai",
 ]
 
 [tool.uv]
@@ -21,6 +24,5 @@ package = false
 prerelease = "allow"
 
 [tool.poe.tasks]
-sync = { shell = "$env:UV_PROJECT_ENVIRONMENT = '.venv\\fujinami_env312'; uv sync", interpreter = "pwsh" }
-install = "uv run install_dependencies.py"
+install = "uv pip install -r requirements.txt"
 dev = "uvicorn api:app --reload"
