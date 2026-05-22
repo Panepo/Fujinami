@@ -454,12 +454,13 @@ class RagService:
             logger.warning("No chunks to add")
             return
 
+        typed_batch = pa.Table.from_pylist(rows, schema=_LANCEDB_SCHEMA)
         if self._table is not None:
-            self._table.add(rows)
+            self._table.add(typed_batch)
             logger.info("Added %d rows to LanceDB table '%s'", len(rows), _TABLE_NAME)
         else:
             self._table = self._db.create_table(
-                _TABLE_NAME, data=rows, schema=_LANCEDB_SCHEMA
+                _TABLE_NAME, data=typed_batch, schema=_LANCEDB_SCHEMA
             )
             logger.info("Created LanceDB table '%s' with %d rows", _TABLE_NAME, len(rows))
 

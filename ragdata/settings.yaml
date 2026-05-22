@@ -92,7 +92,6 @@ embed_text:
   names:
     - text_unit_text
     - entity_description
-    - community_full_content
 
 vector_store:
   type: lancedb

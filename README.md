@@ -9,7 +9,7 @@ A hybrid **Retrieval-Augmented Generation (RAG)** system that combines [Microsof
 - **Hybrid search** — blends dense vector search (LanceDB) with graph-based retrieval (GraphRAG knowledge graph) for richer answers
 - **Three query modes** — `vector`, `hybrid`, and `global` (community-level summaries)
 - **Multi-collection** — manage independent document collections via a REST API
-- **Rich document ingestion** — supports `.txt`, `.md`, `.pdf`, `.docx`, and `.doc` files; embedded images are described inline by a VLM before indexing
+- **Rich document ingestion** — powered by [Docling](https://github.com/DS4SD/docling); supports documents (`.pdf`, `.docx`, `.xlsx`, `.pptx`, `.md`, `.tex`, `.html`, `.csv`, and more), images (`.png`, `.jpg`, `.jpeg`, `.tiff`, `.bmp`, `.webp`), audio (`.wav`, `.mp3`, `.m4a`, `.aac`, `.ogg`, `.flac`), and video (`.mp4`, `.avi`, `.mov`); embedded pictures are described inline by a VLM via Docling's built-in picture-description pipeline
 - **Streaming responses** — optional token-by-token streaming on query endpoints
 - **Built-in Web UI** — zero-configuration browser interface served at `/`
 - **Fully local** — all LLM, embedding, and VLM calls go to Ollama; no cloud APIs required
@@ -20,10 +20,16 @@ A hybrid **Retrieval-Augmented Generation (RAG)** system that combines [Microsof
 ## Architecture Overview
 
 ```
-Documents (.txt .md .pdf .docx .doc)
+Documents (.pdf .docx .xlsx .pptx .md .txt …)
+Images   (.png .jpg .tiff .webp …)
+Audio    (.wav .mp3 .m4a …)
+Video    (.mp4 .avi .mov …)
         │
         ▼
-  DocumentLoader  ──▶  VLM image descriptions (llava:7b)
+  DocumentLoader  ──▶  Docling DocumentConverter
+    (docling[asr])         ├─ OCR + table extraction
+                           ├─ VLM picture description (llava:7b)
+                           └─ export_to_markdown()
         │
         ▼
   ┌─────────────────────────────────┐
@@ -64,13 +70,13 @@ See [docs/dataflow-ragService.md](docs/dataflow-ragService.md) for full pipeline
 Pull these before first use:
 
 ```sh
-# Chat and query-time embeddings (local)
+# Chat and query-time (local)
 ollama pull llama3.2:3b
 ollama pull bge-m3:567m
 
-# Index-time embeddings and VLM (can be on a remote GPU server)
+# Index-time embeddings and VLM for picture description (can be on a remote GPU server)
 ollama pull bge-m3:567m
-ollama pull llava:7b
+ollama pull llava:7b   # used by Docling's picture-description pipeline
 ```
 
 ---
@@ -240,7 +246,7 @@ Fujinami/
 ├── python/
 │   ├── api.py                  # FastAPI application and all HTTP endpoints
 │   ├── ragService.py           # RagService: indexing + search logic
-│   ├── document_loader.py      # PDF/DOCX/DOC/TXT loader with VLM image descriptions
+│   ├── document_loader.py      # Docling-based loader; converts all supported formats to markdown
 │   ├── ragas_runner.py         # RAGAS metric registry and async evaluation runner
 │   ├── models.py               # Pydantic request/response schemas
 │   ├── install_dependency.py   # Dependency installer script
@@ -281,8 +287,8 @@ Omitting `entity_types` uses the GraphRAG defaults.
 
 | Condition | Behaviour |
 |---|---|
-| VLM call fails or times out | Warning logged; image position left blank; indexing continues |
-| `.doc` file on non-Windows | File skipped with warning |
+| Docling models not downloaded | First call to `DocumentConverter` triggers automatic download (~1 GB layout/OCR models); bake into Docker image with `RUN python -c "from docling.document_converter import DocumentConverter; DocumentConverter()"`  |
+| VLM picture description fails or times out | Warning logged by Docling; image rendered as placeholder; indexing continues |
 | Unsupported file extension | File rejected at upload with HTTP 422 |
 | `graphrag index` subprocess fails | Indexing task transitions to `error`; detail message returned |
 | Ollama server unreachable | HTTP 500 propagated to API caller |

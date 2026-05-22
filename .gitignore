@@ -184,3 +184,4 @@ cython_debug/
 ragdata/*
 data/*
 !ragdata/settings.yaml
+models/*
