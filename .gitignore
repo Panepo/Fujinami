@@ -185,3 +185,5 @@ ragdata/*
 data/*
 !ragdata/settings.yaml
 models/*
+.github/reference/*
+!.github/reference/*.md

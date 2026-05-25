@@ -3,7 +3,7 @@ Pydantic request/response models for the FastAPI RAG server.
 """
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import BaseModel
 
@@ -20,6 +20,8 @@ class CollectionInfo(BaseModel):
     name: str
     doc_count: int
     index_status: Literal["not_indexed", "indexed", "new_docs"] = "not_indexed"
+    vector_indexed: bool = False
+    graph_indexed: bool = False
 
 
 class DocumentInfo(BaseModel):
@@ -42,6 +44,7 @@ ALL_ENTITY_TYPES = [
 
 class IndexRequest(BaseModel):
     entity_types: list[str] | None = None
+    mode: Literal["vector", "graph", "all"] = "all"
 
 
 class IndexResponse(BaseModel):
@@ -75,8 +78,13 @@ class QueryResponse(BaseModel):
     collection: str
     method: str
     answer: str
-    sources: list[SourceChunk] | None
+    sources: list[SourceChunk] | None = None
     graphrag_context: str | None = None
+
+
+class DocumentChunk(BaseModel):
+    chunk_index: int
+    text: str
 
 
 # ---------------------------------------------------------------------------

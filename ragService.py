@@ -1,79 +1,46 @@
-"""
-RagService — hybrid RAG using Semantic Kernel + LanceDB + Microsoft GraphRAG.
+﻿"""
+RagService â€” thin faÃ§ade over RagIndexer + RagRetriever.
 
 Stack
 -----
-- Indexing LLM / VLM / Embeddings  : Ollama on OLLAMA_INDEX_URL (gemma4:e4b / llava:7b / bge-m3:567m)
-- Chat LLM                         : Ollama on OLLAMA_CHAT_URL (llama3.2:3b)
+- Indexing LLM / VLM / Embeddings  : Ollama on OLLAMA_INDEX_URL
+- Chat LLM                         : Ollama on OLLAMA_CHAT_URL
 - Vector store                     : LanceDB (persistent, embedded, file-based)
-- Graph engine                     : Microsoft GraphRAG (CLI subprocess)
+- Graph engine                     : graph_engine (local triple extraction + LanceDB storage)
+
+This module delegates all work to:
+  :class:`indexer.RagIndexer`   â€” document loading, delta detection, LanceDB upsert, graph extraction
+  :class:`retriever.RagRetriever` â€” vector search, graph context, response generation
 """
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import os
-import subprocess  # nosec B404
-import sys
 from pathlib import Path
-from typing import Optional
 
-import pyarrow as pa
-from dotenv import load_dotenv
-
-from document_loader import DocumentLoader, SUPPORTED_EXTENSIONS
-
-load_dotenv(Path(__file__).parent / ".env")
+from indexer import RagIndexer, SUPPORTED_EXTENSIONS
+from retriever import RagRetriever
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# LanceDB schema
-# ---------------------------------------------------------------------------
-
-_LANCEDB_SCHEMA = pa.schema(
-    [
-        pa.field("id", pa.string()),
-        pa.field("doc_id", pa.string()),
-        pa.field("text", pa.string()),
-        pa.field("vector", pa.list_(pa.float32(), 384)),
-        pa.field("metadata", pa.string()),
-    ]
-)
-
-_TABLE_NAME = "documents"
-_CHUNK_SIZE = 1000
-_CHUNK_OVERLAP = 200
-_TOP_K = 5
-
-# ---------------------------------------------------------------------------
-# Ollama service configuration
-# ---------------------------------------------------------------------------
-
-_OLLAMA_INDEX_URL = os.environ["OLLAMA_INDEX_URL"]
-_OLLAMA_CHAT_URL = os.environ["OLLAMA_CHAT_URL"]
-_CHAT_MODEL = os.environ["CHAT_MODEL"]
-_EMBEDDING_MODEL = os.environ["EMBEDDING_MODEL"]
-_VLM_MODEL = os.environ["VLM_MODEL"]
-_VLM_TIMEOUT = float(os.environ.get("VLM_TIMEOUT", "180"))
 
 
 class RagService:
     """
     Hybrid retrieval-augmented generation service.
 
+    Thin faÃ§ade over :class:`indexer.RagIndexer` and :class:`retriever.RagRetriever`.
+
     Parameters
     ----------
     collection_name:
-        Name of the document collection (e.g. ``"A"``, ``"B"``).
+        Name of the document collection (e.g. ``"harusame"``).
         When set, documents live in ``{root_dir}/data/{collection_name}/``
         and each collection gets its own isolated ragdata and LanceDB store
         under ``{root_dir}/ragdata/{collection_name}/``.
         When ``None`` (default), the legacy single-collection layout is used.
     root_dir:
         Root directory for data, ragdata, and LanceDB storage.
-        Defaults to the directory containing this file (``python/``).
+        Defaults to the directory containing this file.
     lance_db_path:
         Path to the LanceDB database directory.
         Defaults to ``{ragdata_dir}/lancedb``.
@@ -85,496 +52,85 @@ class RagService:
         root_dir: str | Path | None = None,
         lance_db_path: str | Path | None = None,
     ) -> None:
-        self._root_dir = Path(root_dir) if root_dir else Path(__file__).parent
-        self._collection_name = collection_name
-
-        if collection_name is not None:
-            self._ragdata_dir = self._root_dir / "ragdata" / collection_name
-            self._data_dir = self._root_dir / "data" / collection_name
-        else:
-            self._ragdata_dir = self._root_dir / "ragdata"
-            self._data_dir = self._root_dir / "data"
-
-        lance_path = (
-            Path(lance_db_path) if lance_db_path else self._ragdata_dir / "lancedb"
+        kwargs = dict(
+            collection_name=collection_name,
+            root_dir=root_dir,
+            lance_db_path=lance_db_path,
         )
-
-        # --- Semantic Kernel setup ---
-        from semantic_kernel import Kernel
-        from semantic_kernel.connectors.ai.ollama import (
-            OllamaChatCompletion,
-            OllamaTextEmbedding,
-        )
-
-        self._kernel = Kernel()
-
-        self._chat_service = OllamaChatCompletion(
-            ai_model_id=_CHAT_MODEL,
-            host=_OLLAMA_CHAT_URL,
-            service_id="chat",
-        )
-        # Used at index time to embed documents
-        self._embedding_service = OllamaTextEmbedding(
-            ai_model_id=_EMBEDDING_MODEL,
-            host=_OLLAMA_INDEX_URL,
-            service_id="embedding",
-        )
-        # Used at query time to embed the search query
-        self._query_embedding_service = OllamaTextEmbedding(
-            ai_model_id=_EMBEDDING_MODEL,
-            host=_OLLAMA_CHAT_URL,
-            service_id="query_embedding",
-        )
-
-        self._kernel.add_service(self._chat_service)
-        self._kernel.add_service(self._embedding_service)
-        self._kernel.add_service(self._query_embedding_service)
-
-        # --- LanceDB setup ---
-        import lancedb  # noqa: PLC0415
-
-        lance_path.mkdir(parents=True, exist_ok=True)
-        self._db = lancedb.connect(str(lance_path))
-
-        if _TABLE_NAME in self._db.table_names():
-            self._table = self._db.open_table(_TABLE_NAME)
-            logger.info("Opened existing LanceDB table '%s'", _TABLE_NAME)
-        else:
-            self._table = None
-            logger.info("LanceDB table '%s' will be created on first index", _TABLE_NAME)
-
-        self._manifest_path = lance_path / "file_manifest.json"
-
-        if collection_name is not None:
-            self._ensure_settings_yaml()
+        self._indexer = RagIndexer(**kwargs)
+        self._retriever = RagRetriever(**kwargs)
 
     # ------------------------------------------------------------------
-    # Indexing
+    # Indexing (delegated to RagIndexer)
     # ------------------------------------------------------------------
 
     async def index_documents(
         self,
         documents_dir: str | Path | None = None,
         entity_types: list[str] | None = None,
+        mode: str = "all",
     ) -> None:
-        """
-        Incremental indexing pipeline:
-
-        1. Compute per-file delta against ``file_manifest.json``.
-        2. If nothing changed, return immediately.
-        3. Delete ``.txt`` files and LanceDB rows for removed/modified sources.
-        4. Load and convert only new/modified files via :class:`DocumentLoader`.
-        5. Write plain-text ``.txt`` files to ``{root_dir}/data/``.
-        6. Run GraphRAG CLI indexer (subprocess).
-        7. Chunk, embed, and add vectors into LanceDB.
-        8. Save updated manifest.
-        """
-        if documents_dir is None:
-            documents_dir = self._data_dir
-        documents_dir = Path(documents_dir)
-        self._data_dir.mkdir(parents=True, exist_ok=True)
-
-        # Step 1 — delta detection
-        stored_manifest = self._load_manifest()
-        new_files, modified_files, deleted_files, _ = self._compute_delta(
-            documents_dir, stored_manifest
+        """Incremental indexing pipeline. Delegates to :class:`RagIndexer`."""
+        await self._indexer.index_documents(
+            documents_dir=documents_dir,
+            entity_types=entity_types,
+            mode=mode,
         )
-
-        if not new_files and not modified_files and not deleted_files:
-            logger.info("No changes detected, skipping indexing")
-            return
-
-        logger.info(
-            "Delta — new: %d, modified: %d, deleted: %d",
-            len(new_files), len(modified_files), len(deleted_files),
-        )
-
-        removed_sources = deleted_files | modified_files
-        changed_sources = new_files | modified_files
-
-        # Step 3 — remove stale .txt files and LanceDB rows
-        for doc_id in removed_sources:
-            txt_path = self._data_dir / (Path(doc_id).stem + ".txt")
-            if txt_path.exists():
-                txt_path.unlink()
-                logger.info("Removed stale txt: %s", txt_path.name)
-        if removed_sources:
-            self._remove_from_lancedb(list(removed_sources))
-
-        if not changed_sources:
-            # Only deletions — still need to re-index GraphRAG
-            self._ensure_settings_yaml(entity_types=entity_types)
-            await self._run_graphrag_index()
-            self._save_manifest(documents_dir)
-            return
-
-        # Step 4 — load only changed files (run in thread to avoid blocking the event loop)
-        loader = DocumentLoader(
-            ollama_base_url=_OLLAMA_INDEX_URL,
-            vlm_model=_VLM_MODEL,
-            request_timeout=_VLM_TIMEOUT,
-        )
-        doc_texts = await asyncio.to_thread(
-            loader.load_directory, documents_dir, files_filter=changed_sources
-        )
-
-        if not doc_texts:
-            logger.warning("No content loaded for changed sources")
-            self._save_manifest(documents_dir)
-            return
-
-        # Step 5 — write .txt for changed files only
-        for filename, text in doc_texts.items():
-            txt_path = self._data_dir / (Path(filename).stem + ".txt")
-            txt_path.write_text(text, encoding="utf-8")
-            logger.info("Wrote %s", txt_path.name)
-
-        # Step 6 — GraphRAG indexing
-        self._ensure_settings_yaml(entity_types=entity_types)
-        await self._run_graphrag_index()
-
-        # Step 7 — add new chunks to LanceDB
-        await self._upsert_to_lancedb(doc_texts)
-
-        # Step 8 — persist manifest
-        self._save_manifest(documents_dir)
-
-    def _ensure_settings_yaml(self, entity_types: list[str] | None = None) -> None:
-        """Generate a per-collection ``settings.yaml`` from the root template.
-
-        Reads ``{root_dir}/ragdata/settings.yaml`` as a template, sets
-        ``input.base_dir`` to the absolute path of ``self._data_dir``, and
-        writes the result to ``{ragdata_dir}/settings.yaml``.  A new file is
-        written whenever the stored ``base_dir`` value differs from the
-        current one.
-        """
-        import yaml  # noqa: PLC0415
-
-        template_path = self._root_dir / "ragdata" / "settings.yaml"
-        if not template_path.exists():
-            logger.warning("Settings template not found at %s", template_path)
-            return
-
-        template_text = template_path.read_text(encoding="utf-8")
-        config = yaml.safe_load(template_text)
-        target_base_dir = str(self._data_dir.resolve())
-
-        dest_path = self._ragdata_dir / "settings.yaml"
-        chat_api_base = f"{_OLLAMA_CHAT_URL}/v1"
-        index_api_base = f"{_OLLAMA_INDEX_URL}/v1"
-        if dest_path.exists():
-            existing_text = dest_path.read_text(encoding="utf-8")
-            existing = yaml.safe_load(existing_text)
-            existing_base_dir = existing.get("input_storage", {}).get("base_dir")
-            # Also check that the existing file has completion_models (3.x format)
-            # to force regeneration when migrating from old graphrag format.
-            has_new_format = bool(existing.get("completion_models"))
-            existing_completion_base = (
-                existing.get("completion_models", {})
-                .get("default_completion_model", {})
-                .get("api_base")
-            )
-            existing_index_emb_base = (
-                existing.get("embedding_models", {})
-                .get("indexing_embedding_model", {})
-                .get("api_base")
-            )
-            existing_query_emb_base = (
-                existing.get("embedding_models", {})
-                .get("query_embedding_model", {})
-                .get("api_base")
-            )
-            if (
-                existing_base_dir == target_base_dir
-                and has_new_format
-                and existing_completion_base == chat_api_base
-                and existing_index_emb_base == index_api_base
-                and existing_query_emb_base == chat_api_base
-            ):
-                logger.info(
-                    "settings.yaml for collection '%s' already up to date",
-                    self._collection_name,
-                )
-                return
-
-        config.setdefault("input_storage", {})["base_dir"] = target_base_dir
-        # Use OLLAMA_CHAT_URL for GraphRAG query (response generation)
-        config.setdefault("completion_models", {}).setdefault(
-            "default_completion_model", {}
-        ).update({"api_base": chat_api_base, "model": _CHAT_MODEL})
-        # Indexing embeddings → OLLAMA_INDEX_URL (remote GPU server)
-        config.setdefault("embedding_models", {}).setdefault(
-            "indexing_embedding_model", {}
-        )["api_base"] = index_api_base
-        # Query embeddings → OLLAMA_CHAT_URL (local server)
-        config.setdefault("embedding_models", {}).setdefault(
-            "query_embedding_model", {}
-        )["api_base"] = chat_api_base
-        if entity_types is not None:
-            config.setdefault("extract_graph", {})["entity_types"] = entity_types
-        self._ragdata_dir.mkdir(parents=True, exist_ok=True)
-        dest_path.write_text(yaml.dump(config, allow_unicode=True), encoding="utf-8")
-        logger.info(
-            "Wrote settings.yaml for collection '%s' → %s",
-            self._collection_name,
-            dest_path,
-        )
-
-    async def _run_graphrag_index(self) -> None:
-        """Run ``graphrag index`` as a subprocess."""
-        cmd = [sys.executable, "-m", "graphrag", "index", "--root", str(self._ragdata_dir)]
-        logger.info("Running GraphRAG indexer: %s", " ".join(cmd))
-        # Suppress upstream ResourceWarning (aiohttp unclosed sessions from litellm)
-        # and FutureWarning (pandas deprecation in graphrag) — both are noise from
-        # third-party code that we cannot patch directly.
-        env = os.environ.copy()
-        existing_warn = env.get("PYTHONWARNINGS", "")
-        extra = "ignore::ResourceWarning,ignore::FutureWarning"
-        env["PYTHONWARNINGS"] = f"{existing_warn},{extra}" if existing_warn else extra
-        result = await asyncio.to_thread(
-            subprocess.run,  # nosec B603
-            cmd,
-            capture_output=True,
-            text=True,
-            env=env,
-        )
-        if result.returncode != 0:
-            logger.warning(
-                "GraphRAG indexing failed (rc=%d)\nstdout:\n%s\nstderr:\n%s",
-                result.returncode,
-                result.stdout,
-                result.stderr,
-            )
-        else:
-            logger.info("GraphRAG indexing completed successfully")
-
-    def _load_manifest(self) -> dict[str, dict]:
-        """Load ``file_manifest.json`` → ``{filename: {mtime, size}}``.
-
-        Returns an empty dict if the file doesn't exist or is malformed.
-        """
-        if not self._manifest_path.exists():
-            return {}
-        try:
-            return json.loads(self._manifest_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as exc:
-            logger.warning("Could not read manifest, treating as empty: %s", exc)
-            return {}
-
-    def _compute_delta(
-        self,
-        documents_dir: Path,
-        stored_manifest: dict[str, dict],
-    ) -> tuple[set[str], set[str], set[str], set[str]]:
-        """Compare on-disk files against *stored_manifest*.
-
-        Returns
-        -------
-        tuple of (new_files, modified_files, deleted_files, unchanged_files)
-            Each element is a ``set[str]`` of filenames (basename only).
-        """
-        on_disk: dict[str, dict] = {}
-        for file_path in documents_dir.rglob("*"):
-            if file_path.is_file() and file_path.suffix.lower() in SUPPORTED_EXTENSIONS:
-                stat = file_path.stat()
-                on_disk[file_path.name] = {"mtime": stat.st_mtime, "size": stat.st_size}
-
-        on_disk_names = set(on_disk)
-        stored_names = set(stored_manifest)
-
-        new_files = on_disk_names - stored_names
-        deleted_files = stored_names - on_disk_names
-        modified_files: set[str] = set()
-        unchanged_files: set[str] = set()
-
-        for name in on_disk_names & stored_names:
-            cur = on_disk[name]
-            prev = stored_manifest[name]
-            if cur["mtime"] != prev["mtime"] or cur["size"] != prev["size"]:
-                modified_files.add(name)
-            else:
-                unchanged_files.add(name)
-
-        return new_files, modified_files, deleted_files, unchanged_files
-
-    def _save_manifest(self, documents_dir: Path) -> None:
-        """Write fresh ``file_manifest.json`` reflecting all on-disk files."""
-        manifest: dict[str, dict] = {}
-        for file_path in documents_dir.rglob("*"):
-            if file_path.is_file() and file_path.suffix.lower() in SUPPORTED_EXTENSIONS:
-                stat = file_path.stat()
-                manifest[file_path.name] = {"mtime": stat.st_mtime, "size": stat.st_size}
-        self._manifest_path.write_text(
-            json.dumps(manifest, indent=2), encoding="utf-8"
-        )
-        logger.info("Manifest saved with %d entries", len(manifest))
-
-    def _remove_from_lancedb(self, doc_ids: list[str]) -> None:
-        """Delete all LanceDB rows whose ``doc_id`` is in *doc_ids*."""
-        if self._table is None:
-            return
-        for doc_id in doc_ids:
-            try:
-                safe_id = doc_id.replace("'", "\\'")
-                self._table.delete(f"doc_id = '{safe_id}'")
-                logger.info("Removed LanceDB rows for doc_id '%s'", doc_id)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Delete failed for doc_id '%s': %s", doc_id, exc)
-
-    async def _upsert_to_lancedb(self, doc_texts: dict[str, str]) -> None:
-        """Chunk texts, generate embeddings, and add rows into LanceDB.
-
-        This method is pure-add; callers must remove stale rows beforehand
-        via :meth:`_remove_from_lancedb`.
-        """
-        rows: list[dict] = []
-
-        for filename, text in doc_texts.items():
-            chunks = self._chunk_text(text, _CHUNK_SIZE, _CHUNK_OVERLAP)
-            if not chunks:
-                continue
-
-            embeddings = await self._embedding_service.generate_embeddings(chunks)
-
-            for i, (chunk, emb) in enumerate(zip(chunks, embeddings)):
-                vector = emb.tolist() if hasattr(emb, "tolist") else list(emb)
-                rows.append(
-                    {
-                        "id": f"{filename}#{i}",
-                        "doc_id": filename,
-                        "text": chunk,
-                        "vector": vector,
-                        "metadata": json.dumps(
-                            {"source": filename, "chunk_index": i}
-                        ),
-                    }
-                )
-
-        if not rows:
-            logger.warning("No chunks to add")
-            return
-
-        typed_batch = pa.Table.from_pylist(rows, schema=_LANCEDB_SCHEMA)
-        if self._table is not None:
-            self._table.add(typed_batch)
-            logger.info("Added %d rows to LanceDB table '%s'", len(rows), _TABLE_NAME)
-        else:
-            self._table = self._db.create_table(
-                _TABLE_NAME, data=typed_batch, schema=_LANCEDB_SCHEMA
-            )
-            logger.info("Created LanceDB table '%s' with %d rows", _TABLE_NAME, len(rows))
 
     # ------------------------------------------------------------------
-    # Search methods
+    # Search (delegated to RagRetriever)
     # ------------------------------------------------------------------
 
-    async def vector_search(self, query: str, top_k: int = _TOP_K) -> str:
-        """Pure semantic similarity search — no graph."""
-        if self._table is None:
-            return "No documents indexed yet. Call index_documents() first."
-
-        context = await self._raw_vector_context(query, top_k)
-        return await self._generate_response(query, context)
+    async def vector_search(self, query: str, top_k: int | None = None) -> str:
+        """Pure semantic similarity search. Delegates to :class:`RagRetriever`."""
+        kwargs = {} if top_k is None else {"top_k": top_k}
+        return await self._retriever.vector_search(query, **kwargs)
 
     async def global_search(self, query: str) -> str:
-        """GraphRAG global search — broad community-level summaries."""
-        return await self._graphrag_search(query, method="global")
+        """Global knowledge-graph search. Delegates to :class:`RagRetriever`."""
+        return await self._retriever.global_search(query)
 
-    async def hybrid_search(self, query: str, top_k: int = _TOP_K) -> str:
-        """
-        Run SK vector search and GraphRAG local search in parallel,
-        merge context, and generate a response via SK.
-        """
-        vector_task = asyncio.create_task(self._raw_vector_context(query, top_k))
-        graphrag_task = asyncio.create_task(self._graphrag_search(query, method="local"))
+    async def hybrid_search(self, query: str, top_k: int | None = None) -> str:
+        """Hybrid vector + graph search. Delegates to :class:`RagRetriever`."""
+        kwargs = {} if top_k is None else {"top_k": top_k}
+        return await self._retriever.hybrid_search(query, **kwargs)
 
-        vector_ctx, graphrag_ctx = await asyncio.gather(vector_task, graphrag_task)
-
-        merged = (
-            f"Vector Search Results:\n{vector_ctx}\n\n"
-            f"Graph Search Results:\n{graphrag_ctx}"
-        )
-        return await self._generate_response(query, merged)
+    def get_document_chunks(self, filename: str) -> list[dict]:
+        """Return all stored chunks for *filename*. Delegates to :class:`RagRetriever`."""
+        return self._retriever.get_document_chunks(filename)
 
     # ------------------------------------------------------------------
-    # Internal helpers
+    # Internal helpers (delegated to RagRetriever, used by api.py)
     # ------------------------------------------------------------------
 
-    async def _raw_vector_context(self, query: str, top_k: int = _TOP_K) -> str:
-        """Return raw text chunks from LanceDB for *query*."""
-        results = await self._raw_vector_results(query, top_k)
-        return "\n\n".join(r["text"] for r in results)
+    async def _raw_vector_results(self, query: str, top_k: int | None = None) -> list[dict]:
+        """Return raw LanceDB rows for *query*. Delegates to :class:`RagRetriever`."""
+        kwargs: dict = {} if top_k is None else {"top_k": top_k}
+        return await self._retriever._raw_vector_results(query, **kwargs)
 
-    async def _raw_vector_results(self, query: str, top_k: int = _TOP_K) -> list[dict]:
-        """Return raw LanceDB rows for *query* (keys: doc_id, text, metadata)."""
-        if self._table is None:
-            return []
-        query_emb = await self._query_embedding_service.generate_embeddings([query])
-        vector = (
-            query_emb[0].tolist()
-            if hasattr(query_emb[0], "tolist")
-            else list(query_emb[0])
-        )
-        return self._table.search(vector).limit(top_k).to_list()
+    async def _raw_vector_context(self, query: str, top_k: int | None = None) -> str:
+        """Return concatenated text chunks for *query*. Delegates to :class:`RagRetriever`."""
+        kwargs: dict = {} if top_k is None else {"top_k": top_k}
+        return await self._retriever._raw_vector_context(query, **kwargs)
 
     async def _graphrag_search(self, query: str, method: str = "local") -> str:
-        """Run a GraphRAG query subprocess and return its stdout."""
-        cmd = [
-            sys.executable, "-m", "graphrag", "query",
-            "--root", str(self._ragdata_dir),
-            "--method", method,
-            query,
-        ]
-        result = await asyncio.to_thread(
-            subprocess.run,  # nosec B603
-            cmd,
-            capture_output=True,
-            text=True,
-        )
-        output = result.stdout.strip()
-        if not output:
-            output = result.stderr.strip()
-        return output or f"(GraphRAG {method} search returned no output)"
+        """Return graph context for *query*. Delegates to :class:`RagRetriever`."""
+        return await asyncio.to_thread(self._retriever._graph_context, query)
 
     async def _generate_response(self, query: str, context: str) -> str:
-        """Generate a final answer using the SK chat service given *context*."""
-        from semantic_kernel.contents import ChatHistory  # noqa: PLC0415
-        from semantic_kernel.connectors.ai.prompt_execution_settings import PromptExecutionSettings  # noqa: PLC0415
+        """Generate a response for *query* given *context*. Delegates to :class:`RagRetriever`."""
+        return await self._retriever._generate_response(query, context)
 
-        history = ChatHistory()
-        history.add_system_message(
-            "You are a helpful assistant. Answer the user's question using only "
-            "the provided context. If the context does not contain enough information, "
-            "say so."
-        )
-        history.add_user_message(
-            f"Context:\n{context}\n\nQuestion: {query}"
-        )
-        settings = PromptExecutionSettings()
-        responses = await self._chat_service.get_chat_message_contents(history, settings=settings)
-        return str(responses[0]) if responses else ""
-
-    # ------------------------------------------------------------------
-    # Utility
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _chunk_text(text: str, size: int = _CHUNK_SIZE, overlap: int = _CHUNK_OVERLAP) -> list[str]:
-        """Split *text* into overlapping chunks of at most *size* characters."""
-        chunks: list[str] = []
-        start = 0
-        while start < len(text):
-            end = min(start + size, len(text))
-            chunks.append(text[start:end])
-            if end == len(text):
-                break
-            start += size - overlap
-        return chunks
+    @property
+    def _chat_service(self):
+        """Expose the underlying chat service. Delegates to :class:`RagRetriever`."""
+        return self._retriever._chat_service
 
 
 # ---------------------------------------------------------------------------
 # Convenience factory
 # ---------------------------------------------------------------------------
+
 
 def get_rag_service(
     collection_name: str,
@@ -582,14 +138,12 @@ def get_rag_service(
 ) -> RagService:
     """Return a :class:`RagService` scoped to *collection_name*.
 
-    Equivalent to ``RagService(collection_name=collection_name, root_dir=root_dir)``.
-
     Parameters
     ----------
     collection_name:
-        Name of the document collection (e.g. ``"A"``, ``"B"``).
+        Name of the document collection (e.g. ``"harusame"``).
     root_dir:
         Root directory for data and ragdata storage.
-        Defaults to the directory containing this file (``python/``).
+        Defaults to the directory containing this file.
     """
     return RagService(collection_name=collection_name, root_dir=root_dir)

@@ -1,10 +1,14 @@
 --pre
 agent-framework
 semantic-kernel[ollama]
-graphrag
 lancedb
 pyarrow
 docling[asr]
 ragas>=0.2
 litellm
 openai
+spacy
+langdetect
+openpyxl
+langchain-text-splitters
+python-pptx
