@@ -425,7 +425,7 @@ async def _stream_answer_inner(
     if graphrag_context is not None:
         yield f"event: graphrag\ndata: {json.dumps(graphrag_context)}\n\n"
 
-    if query_req.method == "global":
+    if query_req.method == "graph":
         # GraphRAG global result IS the answer
         answer = graphrag_context or await rag.global_search(query_req.query)
         yield f"event: token\ndata: {json.dumps(answer)}\n\n"
@@ -437,9 +437,14 @@ async def _stream_answer_inner(
         if query_req.method == "hybrid":
             if graphrag_context is None:
                 graphrag_context = await rag._graphrag_search(query_req.query, method="local")
-            context = f"Vector Search Results:\n{vector_context}\n\nGraph Search Results:\n{graphrag_context}"
+            parts_ctx: list[str] = []
+            if vector_context:
+                parts_ctx.append(f"Vector Search Results:\n{vector_context}")
+            if graphrag_context:
+                parts_ctx.append(f"Graph Search Results:\n{graphrag_context}")
+            context = "\n\n".join(parts_ctx)
         else:
-            context = vector_context
+            context = vector_context or ""
 
         history = ChatHistory()
         history.add_system_message(
@@ -474,8 +479,8 @@ async def query_collection(name: str, body: QueryRequest):
     vector_context: str | None = None
     graphrag_context: str | None = None
 
-    # Fetch vector chunks for non-global methods
-    if body.method != "global":
+    # Fetch vector chunks for non-graph methods
+    if body.method != "graph":
         raw_rows = await rag._raw_vector_results(body.query, body.top_k)
         vector_context = "\n\n".join(r.get("text", "") for r in raw_rows)
         sources = []
@@ -496,7 +501,7 @@ async def query_collection(name: str, body: QueryRequest):
     # Fetch GraphRAG context for hybrid and global methods
     if body.method == "hybrid":
         graphrag_context = await rag._graphrag_search(body.query, method="local")
-    elif body.method == "global":
+    elif body.method == "graph":
         graphrag_context = await rag._graphrag_search(body.query, method="global")
 
     if body.stream:
@@ -508,10 +513,15 @@ async def query_collection(name: str, body: QueryRequest):
     # Non-streaming path — generate answer from pre-fetched context
     if body.method == "vector":
         answer = await rag._generate_response(body.query, vector_context or "")
-    elif body.method == "global":
+    elif body.method == "graph":
         answer = graphrag_context or ""
     else:  # hybrid
-        merged = f"Vector Search Results:\n{vector_context}\n\nGraph Search Results:\n{graphrag_context}"
+        parts: list[str] = []
+        if vector_context:
+            parts.append(f"Vector Search Results:\n{vector_context}")
+        if graphrag_context:
+            parts.append(f"Graph Search Results:\n{graphrag_context}")
+        merged = "\n\n".join(parts)
         answer = await rag._generate_response(body.query, merged)
 
     return QueryResponse(

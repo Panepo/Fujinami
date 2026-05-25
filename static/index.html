@@ -123,6 +123,7 @@
     .expand-btn { background: none; border: none; cursor: pointer; color: #0f3460; font-size: .75rem; font-weight: 600; }
     .sample-detail { display: none; white-space: pre-wrap; font-size: .78rem; color: #445; background: #f8f9fb; border-radius: 4px; padding: 6px; margin-top: 4px; }
     .sample-detail.open { display: block; }
+    button:disabled { opacity: .65; cursor: not-allowed; }
     .btn-send-verify { background: #166534; color: #fff; margin-top: 8px; font-size: .82rem; padding: 4px 12px; }
     .btn-send-verify:hover { background: #15803d; }
     #verify-toast { position: fixed; bottom: 1.5rem; right: 1.5rem; background: #c0392b; color: #fff; padding: 10px 14px; border-radius: 7px; font-size: .875rem; max-width: 380px; opacity: 0; pointer-events: none; transition: opacity .25s; z-index: 999; }
@@ -263,14 +264,14 @@
           <label>Method</label>
           <div class="radio-group">
             <label><input type="radio" name="qry-method" value="hybrid" checked /> hybrid</label>
-            <label><input type="radio" name="qry-method" value="vector" /> vector</label>
-            <label><input type="radio" name="qry-method" value="global" /> global</label>
+            <label><input type="radio" name="qry-method" value="vector" /> vector only</label>
+            <label><input type="radio" name="qry-method" value="graph" /> graph only</label>
           </div>
         </div>
         <div style="flex:0;white-space:nowrap">
           <label><input type="checkbox" id="chk-stream" /> stream</label>
         </div>
-        <button class="btn-primary" onclick="submitQuery()">Ask</button>
+        <button class="btn-primary" id="btn-ask" onclick="submitQuery()"><span class="verify-spinner" id="spin-ask"></span>Ask</button>
       </div>
       <div id="answer-box"></div>
       <div id="query-stats"></div>
@@ -279,7 +280,7 @@
         <summary>Context sent to LLM</summary>
         <div id="context-chunks-list" style="margin-top:6px"></div>
         <div id="graphrag-context-wrap" style="display:none;margin-top:10px">
-          <p style="font-size:.8rem;font-weight:600;color:#555;margin-bottom:4px">GraphRAG context</p>
+          <p style="font-size:.8rem;font-weight:600;color:#555;margin-bottom:4px">Graph context</p>
           <div id="graphrag-context-box" class="graphrag-box"></div>
         </div>
       </details>
@@ -694,7 +695,7 @@ function updateQueryMethodAvailability() {
   const flags = _collectionFlags[col] || { vector_indexed: false, graph_indexed: false };
   const rules = {
     vector: flags.vector_indexed,
-    global: flags.graph_indexed,
+    graph: flags.graph_indexed,
     hybrid: flags.vector_indexed && flags.graph_indexed,
   };
   let checkedDisabled = false;
@@ -756,6 +757,7 @@ function renderGraphragContext(text) {
   $('graphrag-context-box').textContent = text;
   $('graphrag-context-wrap').style.display = '';
   $('context-detail').style.display = '';
+  $('context-detail').open = true;
 }
 
 function escHtml(str) {
@@ -778,10 +780,18 @@ async function submitQuery() {
   $('tbl-sources').querySelector('tbody').innerHTML = '';
   clearContextPanel();
 
-  if (stream) {
-    await streamQuery(col, query, method);
-  } else {
-    await nonStreamQuery(col, query, method);
+  const btnAsk = $('btn-ask');
+  btnAsk.disabled = true;
+  btnAsk.classList.add('btn-evaluating');
+  try {
+    if (stream) {
+      await streamQuery(col, query, method);
+    } else {
+      await nonStreamQuery(col, query, method);
+    }
+  } finally {
+    btnAsk.disabled = false;
+    btnAsk.classList.remove('btn-evaluating');
   }
 }
 
@@ -796,7 +806,8 @@ async function nonStreamQuery(col, query, method) {
       renderContextChunks(res.sources);
       renderSources(res.sources);
     }
-    if (res.graphrag_context) {
+    // For graph-only method the answer IS the graph context — skip duplicate display
+    if (res.graphrag_context && method !== 'graph') {
       renderGraphragContext(res.graphrag_context);
     }
     _lastQueryData = { query, answer: res.answer, sources: res.sources || [] };
@@ -851,7 +862,8 @@ async function streamQuery(col, query, method) {
         } else if (eventType === 'chunks') {
           try { renderContextChunks(JSON.parse(data)); } catch(_) {}
         } else if (eventType === 'graphrag') {
-          try { renderGraphragContext(JSON.parse(data)); } catch(_) {}
+          // For graph-only method the answer IS the graph context — skip duplicate display
+          if (method !== 'graph') { try { renderGraphragContext(JSON.parse(data)); } catch(_) {} }
         } else if (eventType === 'sources') {
           try { streamedSources = JSON.parse(data); renderSources(streamedSources); } catch(_) {}
         }

@@ -225,22 +225,36 @@ class RagRetriever:
         if not entities:
             return ""
 
-        store = LanceDBGraphStore(self._lance_path)
+        try:
+            store = LanceDBGraphStore(self._lance_path)
+        except Exception as exc:
+            logger.debug("Failed to open graph store: %s", exc)
+            return ""
+
         lines: list[str] = []
         seen: set[str] = set()
 
         for entity in entities:
-            triples = store.get_triples(subject_name=entity)
-            for triple in triples:
+            # Search by subject AND object to catch all relevant triples
+            try:
+                candidate_triples = (
+                    store.get_triples(subject_name=entity)
+                    + store.get_triples(object_name=entity)
+                )
+            except Exception as exc:
+                logger.debug("Graph triple lookup failed for '%s': %s", entity, exc)
+                continue
+            for triple in candidate_triples:
                 key = triple.get("triple_id", "")
                 if key in seen:
                     continue
                 seen.add(key)
-                subj = triple.get("subject_name", "")
-                subj_t = triple.get("subject_type", "")
+                # get_triples returns nested dicts via _row_to_dict: triple["subject"]["name"]
+                subj = triple.get("subject", {}).get("name", "")
+                subj_t = triple.get("subject", {}).get("type", "")
                 pred = triple.get("predicate", "")
-                obj = triple.get("object_name", "")
-                obj_t = triple.get("object_type", "")
+                obj = triple.get("object", {}).get("name", "")
+                obj_t = triple.get("object", {}).get("type", "")
                 w = triple.get("weight", 1.0)
                 lines.append(
                     f"{subj} [{subj_t}] —{pred}→ {obj} [{obj_t}] (weight={w:.2f})"

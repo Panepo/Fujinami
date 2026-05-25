@@ -189,21 +189,24 @@ class LanceDBGraphStore(GraphStore):
         subject_type: str | None = None,
         predicate: str | None = None,
         method: str | None = None,
+        object_name: str | None = None,
     ) -> list[dict[str, Any]]:
         if self._table is None:
             return []
 
         filters: list[str] = []
         if source_doc:
-            filters.append(f"source_doc = '{source_doc}'")
+            filters.append(f"source_doc = '{source_doc.replace(chr(39), chr(39)*2)}'")
         if subject_name:
-            filters.append(f"subject_name = '{subject_name}'")
+            filters.append(f"subject_name = '{subject_name.replace(chr(39), chr(39)*2)}'")
         if subject_type:
-            filters.append(f"subject_type = '{subject_type}'")
+            filters.append(f"subject_type = '{subject_type.replace(chr(39), chr(39)*2)}'")
         if predicate:
-            filters.append(f"predicate = '{predicate}'")
+            filters.append(f"predicate = '{predicate.replace(chr(39), chr(39)*2)}'")
         if method:
-            filters.append(f"method = '{method}'")
+            filters.append(f"method = '{method.replace(chr(39), chr(39)*2)}'")
+        if object_name:
+            filters.append(f"object_name = '{object_name.replace(chr(39), chr(39)*2)}'")
 
         query = self._table.search()
         if filters:

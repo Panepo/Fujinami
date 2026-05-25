@@ -62,7 +62,7 @@ class IndexStatusResponse(BaseModel):
 
 class QueryRequest(BaseModel):
     query: str
-    method: Literal["vector", "global", "hybrid"] = "hybrid"
+    method: Literal["vector", "graph", "hybrid"] = "hybrid"
     top_k: int = 5
     stream: bool = False
 
