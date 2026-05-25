@@ -534,6 +534,48 @@ async def query_collection(name: str, body: QueryRequest):
 
 
 # ---------------------------------------------------------------------------
+# Graph endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.get("/collections/{name}/graph/stats")
+async def get_graph_stats(name: str) -> dict:
+    """Return triple count for the collection's graph store."""
+    from graph_engine.store import LanceDBGraphStore  # noqa: PLC0415
+
+    svc = _get_service(name)
+    lance_path = svc._retriever._lance_path
+    try:
+        store = LanceDBGraphStore(lance_path)
+        return {"triple_count": store.count()}
+    except Exception:
+        return {"triple_count": 0}
+
+
+@app.get("/collections/{name}/graph")
+async def get_graph_triples(
+    name: str,
+    source_doc: str | None = None,
+    subject_type: str | None = None,
+    predicate: str | None = None,
+) -> list[dict]:
+    """Return triples from the knowledge graph, with optional filters."""
+    from graph_engine.store import LanceDBGraphStore  # noqa: PLC0415
+
+    svc = _get_service(name)
+    lance_path = svc._retriever._lance_path
+    try:
+        store = LanceDBGraphStore(lance_path)
+        return store.get_triples(
+            source_doc=source_doc or None,
+            subject_type=subject_type or None,
+            predicate=predicate or None,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
 # RAGAS evaluation endpoints
 # ---------------------------------------------------------------------------
 
