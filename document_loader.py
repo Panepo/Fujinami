@@ -1448,77 +1448,13 @@ class DocumentLoader:
     # ------------------------------------------------------------------
     # Converter builder (picture description disabled — handled in Stage 3)
     # ------------------------------------------------------------------
-
-    def _build_converter(self):
-        """Build Docling DocumentConverter with picture description disabled."""
-        from docling.datamodel.base_models import InputFormat
-        from docling.datamodel.pipeline_options import (
-            ConvertPipelineOptions,
-            PdfPipelineOptions,
-        )
-        from docling.document_converter import (
-            DocumentConverter,
-            ImageFormatOption,
-            PdfFormatOption,
-            WordFormatOption,
-        )
-
-        pdf_opts = PdfPipelineOptions()
-        pdf_opts.do_picture_description = False
-        pdf_opts.images_scale = 2.0
-        pdf_opts.generate_picture_images = True
-
-        docx_opts = ConvertPipelineOptions()
-        docx_opts.do_picture_description = False
-
-        return DocumentConverter(
-            format_options={
-                InputFormat.PDF: PdfFormatOption(pipeline_options=pdf_opts),
-                InputFormat.IMAGE: ImageFormatOption(pipeline_options=pdf_opts),
-                InputFormat.DOCX: WordFormatOption(pipeline_options=docx_opts),
-            }
-        )
-
-    def _ollama_call(
-        self, model: str, prompt: str, image_b64: Optional[str], max_tokens: int
-    ) -> str:
-        import urllib.error
-        import urllib.request
-
-        payload: Dict = {
-            "model": model,
-            "prompt": prompt,
-            "stream": False,
-            "options": {"temperature": 0.1, "num_predict": max_tokens},
-        }
-        if image_b64:
-            payload["images"] = [image_b64]
-
-        data = json.dumps(payload).encode()
-        req = urllib.request.Request(
-            f"{self._base_url}/api/generate",
-            data=data,
-            headers={"Content-Type": "application/json"},
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
-                result = json.loads(resp.read())
-                return result.get("response", "").strip()
-        except Exception as exc:
-            logger.warning("Ollama call failed (%s): %s", self._base_url, exc)
-            return ""
-
-    # ------------------------------------------------------------------
     # Converter builder (picture description disabled — handled in Stage 3)
     # ------------------------------------------------------------------
 
     def _build_converter(self):
         """Build Docling DocumentConverter with picture description disabled."""
         from docling.datamodel.base_models import InputFormat
-        from docling.datamodel.pipeline_options import (
-            ConvertPipelineOptions,
-            PdfPipelineOptions,
-        )
+        from docling.datamodel.pipeline_options import PdfPipelineOptions
         from docling.document_converter import (
             DocumentConverter,
             ImageFormatOption,
@@ -1531,14 +1467,11 @@ class DocumentLoader:
         pdf_opts.images_scale = 2.0
         pdf_opts.generate_picture_images = True
 
-        docx_opts = ConvertPipelineOptions()
-        docx_opts.do_picture_description = False
-
         return DocumentConverter(
             format_options={
                 InputFormat.PDF: PdfFormatOption(pipeline_options=pdf_opts),
                 InputFormat.IMAGE: ImageFormatOption(pipeline_options=pdf_opts),
-                InputFormat.DOCX: WordFormatOption(pipeline_options=docx_opts),
+                InputFormat.DOCX: WordFormatOption(pipeline_options=pdf_opts),
             }
         )
 

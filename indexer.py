@@ -168,6 +168,7 @@ class RagIndexer:
         documents_dir: str | Path | None = None,
         entity_types: list[str] | None = None,
         mode: str = "all",
+        force: bool = False,
     ) -> None:
         """
         Incremental indexing pipeline:
@@ -186,6 +187,10 @@ class RagIndexer:
             ``"all"``    — run both vector (LanceDB) and graph extraction.
             ``"vector"`` — run only LanceDB embedding; skip graph extraction.
             ``"graph"``  — run only graph extraction; skip LanceDB embedding.
+        force:
+            When ``True``, ignore the manifest and reprocess all files from
+            scratch.  Existing LanceDB rows and graph triples for every file
+            in *documents_dir* are deleted before re-indexing.
         """
         run_vector = mode in ("vector", "all")
         run_graph = mode in ("graph", "all")
@@ -194,39 +199,56 @@ class RagIndexer:
         documents_dir = Path(documents_dir)
         self._data_dir.mkdir(parents=True, exist_ok=True)
 
-        # Step 1 — delta detection (SHA-256 hash)
-        stored_manifest = self._load_manifest()
-        new_files, modified_files, deleted_files, _ = self._compute_delta(
-            documents_dir, stored_manifest
-        )
-
-        if not new_files and not modified_files and not deleted_files:
-            logger.info("No changes detected, skipping indexing")
-            return
-
-        logger.info(
-            "Delta — new: %d, modified: %d, deleted: %d",
-            len(new_files), len(modified_files), len(deleted_files),
-        )
-
-        removed_sources = deleted_files | modified_files
-        changed_sources = new_files | modified_files
-
-        # Step 3 — remove stale LanceDB rows and graph triples
-        if removed_sources:
+        if force:
+            # Force full reindex: treat every on-disk file as changed.
+            changed_sources: set[str] = {
+                fp.name
+                for fp in documents_dir.rglob("*")
+                if fp.is_file() and fp.suffix.lower() in SUPPORTED_EXTENSIONS
+            }
+            if not changed_sources:
+                logger.info("Force reindex: no supported files found in %s", documents_dir)
+                return
+            # Remove all existing rows so we don't accumulate duplicates.
             if run_vector:
-                self._remove_from_lancedb(list(removed_sources))
+                self._remove_from_lancedb(list(changed_sources))
             if run_graph:
-                self._remove_graph_triples(list(removed_sources))
-
-        if not changed_sources:
-            # Only deletions
-            self._save_manifest(documents_dir)
-            self._save_index_flags(
-                vector_indexed=True if run_vector else None,
-                graph_indexed=True if run_graph else None,
+                self._remove_graph_triples(list(changed_sources))
+            logger.info("Force reindex: processing %d file(s)", len(changed_sources))
+        else:
+            # Step 1 — delta detection (SHA-256 hash)
+            stored_manifest = self._load_manifest()
+            new_files, modified_files, deleted_files, _ = self._compute_delta(
+                documents_dir, stored_manifest
             )
-            return
+
+            if not new_files and not modified_files and not deleted_files:
+                logger.info("No changes detected, skipping indexing")
+                return
+
+            logger.info(
+                "Delta — new: %d, modified: %d, deleted: %d",
+                len(new_files), len(modified_files), len(deleted_files),
+            )
+
+            removed_sources = deleted_files | modified_files
+            changed_sources = new_files | modified_files
+
+            # Step 3 — remove stale LanceDB rows and graph triples
+            if removed_sources:
+                if run_vector:
+                    self._remove_from_lancedb(list(removed_sources))
+                if run_graph:
+                    self._remove_graph_triples(list(removed_sources))
+
+            if not changed_sources:
+                # Only deletions
+                self._save_manifest(documents_dir)
+                self._save_index_flags(
+                    vector_indexed=True if run_vector else None,
+                    graph_indexed=True if run_graph else None,
+                )
+                return
 
         # Step 4 — load only changed files (run in thread to avoid blocking event loop)
         loader = DocumentLoader(
@@ -238,9 +260,19 @@ class RagIndexer:
             loader.load_directory, documents_dir, files_filter=changed_sources
         )
 
+        # Identify files that failed to load — exclude from manifest so they
+        # are retried on the next indexing run instead of being silently skipped.
+        failed_sources = changed_sources - set(doc_chunks.keys())
+        if failed_sources:
+            logger.warning(
+                "Failed to load %d file(s), will retry on next run: %s",
+                len(failed_sources), failed_sources,
+            )
+
         if not doc_chunks:
             logger.warning("No content loaded for changed sources")
-            self._save_manifest(documents_dir)
+            # Exclude failed files from the manifest so they are not silently skipped.
+            self._save_manifest(documents_dir, exclude=changed_sources)
             return
 
         # Step 5 — graph extraction
@@ -259,8 +291,8 @@ class RagIndexer:
         if run_vector:
             await self._upsert_to_lancedb(doc_chunks)
 
-        # Step 7 — persist manifest
-        self._save_manifest(documents_dir)
+        # Step 7 — persist manifest (excluding files that failed to load)
+        self._save_manifest(documents_dir, exclude=failed_sources)
 
         self._save_index_flags(
             vector_indexed=True if run_vector else None,
@@ -365,12 +397,26 @@ class RagIndexer:
 
         return new_files, modified_files, deleted_files, unchanged_files
 
-    def _save_manifest(self, documents_dir: Path) -> None:
-        """Write fresh ``file_manifest.json`` with SHA-256 hashes for all on-disk files."""
+    def _save_manifest(
+        self,
+        documents_dir: Path,
+        exclude: set[str] | None = None,
+    ) -> None:
+        """Write fresh ``file_manifest.json`` with SHA-256 hashes for all on-disk files.
+
+        Parameters
+        ----------
+        exclude:
+            Filenames to omit from the manifest (e.g. files that failed to
+            load).  Omitted files will appear as *new* on the next run and
+            will be retried.
+        """
+        exclude = exclude or set()
         manifest: dict[str, str] = {}
         for file_path in documents_dir.rglob("*"):
             if file_path.is_file() and file_path.suffix.lower() in SUPPORTED_EXTENSIONS:
-                manifest[file_path.name] = hashlib.sha256(file_path.read_bytes()).hexdigest()
+                if file_path.name not in exclude:
+                    manifest[file_path.name] = hashlib.sha256(file_path.read_bytes()).hexdigest()
         self._manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         logger.info("Manifest saved with %d entries", len(manifest))
 

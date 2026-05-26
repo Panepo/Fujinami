@@ -116,80 +116,38 @@ class HybridExtractor(BaseExtractor):
         self._model = model or os.environ.get("EXTRACT_MODEL", "granite4.1:8b")
         self._timeout = timeout
 
-    # Labels that produce noise on markdown/table content — skip these
-    _SKIP_LABELS = frozenset({
-        "CARDINAL", "ORDINAL", "QUANTITY", "MONEY", "PERCENT",
-    })
-
     # Max pairs to send to LLM — hard cap prevents runaway costs
     _MAX_TOTAL_PAIRS = 20
-
-    @staticmethod
-    def _is_garbage_entity(name: str) -> bool:
-        """Return True if the entity text is obviously not a real entity."""
-        stripped = name.strip()
-        if len(stripped) < 3:
-            return True
-        # Markdown artifacts: headers, table separators, formatting
-        if stripped.startswith("#") or stripped.startswith("|"):
-            return True
-        if "\n" in stripped:
-            return True
-        # Mostly punctuation / symbols
-        alpha_chars = sum(1 for c in stripped if c.isalpha())
-        if alpha_chars < 2:
-            return True
-        return False
 
     def extract(self, text: str, source_doc: str, on_batch: "Callable[[int, int], None] | None" = None) -> list[Triple]:
         if not text.strip():
             return []
 
-        # Step 1 — NER: find entity candidates (filter before label mapping)
+        # Step 1 — Run spaCy's full dependency-based extraction.
+        # This reuses SpacyExtractor's NER + dep-parse pipeline which only
+        # produces nodes that are syntactic subjects/objects of verbs —
+        # naturally filtering out markdown artifacts and noun-chunk noise.
         nlp = _load_model(self._spacy._model_name)
         doc = nlp(text)
-
-        # Pre-filter raw spaCy entities — skip noisy labels
-        filtered_ents = [
-            ent for ent in doc.ents
-            if ent.label_ not in self._SKIP_LABELS
-        ]
-
-        # Build entity map only from filtered ents
         entity_map = self._spacy._build_entity_map(doc)
-        entities = list({node.id: node for node in entity_map.values()}.values())
+        spacy_triples = self._spacy._extract_triples(doc, entity_map, source_doc)
 
-        # Remove garbage text (markdown, symbols, short strings)
-        entities = [e for e in entities if not self._is_garbage_entity(e.name)]
-        good_ids = {e.id for e in entities}
-        entity_map = {k: v for k, v in entity_map.items() if v.id in good_ids}
-
-        if len(entities) < self._fallback_threshold:
+        if len(spacy_triples) < self._fallback_threshold:
             logger.debug(
-                "HybridExtractor: only %d entities after filtering, using LLM fallback", len(entities)
+                "HybridExtractor: only %d spaCy triples, using LLM fallback", len(spacy_triples)
             )
             return self._llm_fallback.extract(text, source_doc)
 
-        # Step 2 — build entity pairs from sentence co-occurrence only
-        # Entities only pair if they appear in the same sentence — prevents
-        # combinatorial explosion (N entities → N*(N-1)/2 pairs across chunk).
-        pairs: list[tuple[Node, Node]] = []
+        # Step 2 — Derive pairs from spaCy's clean dependency triples.
+        # Using dep-parsed pairs instead of co-occurrence prevents garbage
+        # noun chunks from being paired and sent to the LLM.
         seen: set[tuple[str, str]] = set()
-        for sent in doc.sents:
-            sent_nodes: list[Node] = []
-            for token in sent:
-                node = entity_map.get(token.i)
-                if node is not None and node.id not in {n.id for n in sent_nodes}:
-                    sent_nodes.append(node)
-            for i, a in enumerate(sent_nodes):
-                for b in sent_nodes[i + 1 :]:
-                    key = (min(a.id, b.id), max(a.id, b.id))
-                    if key not in seen:
-                        seen.add(key)
-                        pairs.append((a, b))
-
-        if not pairs:
-            return []
+        pairs: list[tuple[Node, Node]] = []
+        for t in spacy_triples:
+            key = (min(t.subject.id, t.object.id), max(t.subject.id, t.object.id))
+            if key not in seen:
+                seen.add(key)
+                pairs.append((t.subject, t.object))
 
         # Hard cap: take only the first N pairs to prevent runaway LLM calls
         if len(pairs) > self._MAX_TOTAL_PAIRS:
@@ -199,7 +157,7 @@ class HybridExtractor(BaseExtractor):
             pairs = pairs[: self._MAX_TOTAL_PAIRS]
 
         logger.debug(
-            "HybridExtractor: %d entities → %d pairs", len(entities), len(pairs)
+            "HybridExtractor: %d spaCy triples → %d unique pairs", len(spacy_triples), len(pairs)
         )
 
         # Step 3 — classify relations in batches
@@ -220,6 +178,12 @@ class HybridExtractor(BaseExtractor):
     def _classify_relations(
         self, text: str, pairs: list[tuple[Node, Node]], source_doc: str
     ) -> list[Triple]:
+        # Build a case-insensitive lookup so _parse_classified can reuse spaCy nodes
+        node_lookup: dict[str, Node] = {}
+        for a, b in pairs:
+            node_lookup[a.name.lower()] = a
+            node_lookup[b.name.lower()] = b
+
         pairs_json = json.dumps(
             [
                 {"subject": a.name, "subject_type": a.type, "object": b.name, "object_type": b.type}
@@ -259,9 +223,9 @@ class HybridExtractor(BaseExtractor):
             logger.warning("HybridExtractor Ollama call failed: %s", exc)
             return []
 
-        return self._parse_classified(raw, source_doc)
+        return self._parse_classified(raw, source_doc, node_lookup)
 
-    def _parse_classified(self, raw: str, source_doc: str) -> list[Triple]:
+    def _parse_classified(self, raw: str, source_doc: str, node_lookup: dict[str, "Node"] | None = None) -> list[Triple]:
         if not raw:
             return []
 
@@ -278,18 +242,26 @@ class HybridExtractor(BaseExtractor):
             except json.JSONDecodeError:
                 return []
 
+        node_lookup = node_lookup or {}
         triples: list[Triple] = []
         for item in items:
             try:
-                subj = Node(
-                    name=str(item["subject"]).strip(),
-                    type=str(item.get("subject_type", "Other")),
-                    source_doc=source_doc,
+                subj_name = str(item["subject"]).strip()
+                obj_name = str(item["object"]).strip()
+
+                # Reuse spaCy node if name matches (case-insensitive); fall back to LLM's data
+                spacy_subj = node_lookup.get(subj_name.lower())
+                spacy_obj = node_lookup.get(obj_name.lower())
+
+                subj = (
+                    spacy_subj.model_copy(update={"source_doc": source_doc})
+                    if spacy_subj is not None
+                    else Node(name=subj_name, type=str(item.get("subject_type", "Other")), source_doc=source_doc)
                 )
-                obj = Node(
-                    name=str(item["object"]).strip(),
-                    type=str(item.get("object_type", "Other")),
-                    source_doc=source_doc,
+                obj = (
+                    spacy_obj.model_copy(update={"source_doc": source_doc})
+                    if spacy_obj is not None
+                    else Node(name=obj_name, type=str(item.get("object_type", "Other")), source_doc=source_doc)
                 )
                 relation = str(item.get("relation", "related_to")).strip()
                 confidence = float(item.get("confidence", 1.0))
@@ -297,8 +269,8 @@ class HybridExtractor(BaseExtractor):
                 triples.append(
                     Triple(
                         subject=subj,
-                        predicate=relation,
                         object=obj,
+                        predicate=relation,
                         weight=min(max(confidence, 0.0), 1.0),
                         source_doc=source_doc,
                     )

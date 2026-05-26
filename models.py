@@ -45,6 +45,7 @@ ALL_ENTITY_TYPES = [
 class IndexRequest(BaseModel):
     entity_types: list[str] | None = None
     mode: Literal["vector", "graph", "all"] = "all"
+    force: bool = False
 
 
 class IndexResponse(BaseModel):
@@ -85,6 +86,9 @@ class QueryResponse(BaseModel):
 class DocumentChunk(BaseModel):
     chunk_index: int
     text: str
+    chunk_type: str | None = None
+    section_title: str | None = None
+    page_number: int | None = None
 
 
 # ---------------------------------------------------------------------------

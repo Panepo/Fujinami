@@ -41,9 +41,11 @@
     .badge-running  { background: #dbeafe; color: #1e40af; }
     .badge-done     { background: #dcfce7; color: #166534; }
     .badge-error    { background: #fee2e2; color: #991b1b; }
-    .badge-indexed    { background: #dcfce7; color: #166534; }
-    .badge-not_indexed { background: #f1f5f9; color: #64748b; }
-    .badge-new_docs   { background: #fff7ed; color: #c2410c; }
+    .badge-indexed      { background: #dcfce7; color: #166534; }
+    .badge-not_indexed  { background: #f1f5f9; color: #64748b; }
+    .badge-new_docs     { background: #fff7ed; color: #c2410c; }
+    .badge-vector_only  { background: #dbeafe; color: #1e40af; }
+    .badge-graph_only   { background: #f3e8ff; color: #6b21a8; }
     #answer-box { background: #f8f8fc; border-radius: 4px; padding: 10px; font-size: .88rem; white-space: pre-wrap; min-height: 80px; margin-top: 10px; }
     .thinking-indicator { display: flex; align-items: center; gap: 8px; color: #64748b; font-size: .85rem; font-style: italic; }
     .thinking-dots span { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #94a3b8; animation: thinking-bounce .9s ease-in-out infinite; }
@@ -63,6 +65,7 @@
     .radio-group { display: flex; gap: 12px; align-items: center; margin-top: 4px; font-size: .85rem; }
     .radio-group label { display: flex; align-items: center; gap: 4px; }
     @media(max-width: 700px) { main { grid-template-columns: 1fr; } }
+    .btn-dl { display: inline-block; text-decoration: none; vertical-align: middle; padding: 5px 12px; font-size: .85rem; border-radius: 4px; cursor: pointer; border: none; }
 
     /* ---- Env config ---- */
     .env-table td:first-child { font-family: monospace; font-size: .82rem; font-weight: 600; color: #1a1a2e; white-space: nowrap; }
@@ -491,9 +494,13 @@ async function loadCollections() {
   updateQueryMethodAvailability();
 }
 
-function indexStatusBadge(status) {
-  const labels = { indexed: 'Indexed', not_indexed: 'Not Indexed', new_docs: 'New Docs' };
-  return `<span class="badge badge-${status}">${labels[status] ?? status}</span>`;
+function indexStatusBadge(vectorIndexed, graphIndexed) {
+  let status, label;
+  if (vectorIndexed && graphIndexed)       { status = 'indexed';      label = 'Indexed'; }
+  else if (vectorIndexed && !graphIndexed) { status = 'vector_only';  label = 'Vector Only'; }
+  else if (!vectorIndexed && graphIndexed) { status = 'graph_only';   label = 'Graph Only'; }
+  else                                     { status = 'not_indexed';  label = 'Not Indexed'; }
+  return `<span class="badge badge-${status}">${label}</span>`;
 }
 
 function renderCollectionsTable(cols) {
@@ -507,7 +514,7 @@ function renderCollectionsTable(cols) {
     <tr>
       <td>${c.name}</td>
       <td>${c.doc_count}</td>
-      <td>${indexStatusBadge(c.index_status)}</td>
+      <td>${indexStatusBadge(c.vector_indexed, c.graph_indexed)}</td>
       <td style="white-space:nowrap">
         <button class="btn-warn" onclick="renameCollection('${c.name}')">Rename</button>
         <button class="btn-danger" onclick="deleteCollection('${c.name}')">Delete</button>
@@ -574,6 +581,7 @@ function renderDocumentsTable(col, docs) {
       <td>${fmt(d.size_bytes)}</td>
       <td style="white-space:nowrap">
         <button class="btn-primary" onclick="viewDocumentChunks('${col}','${d.filename}')">View</button>
+        <a class="btn-primary btn-dl" href="/collections/${col}/documents/${encodeURIComponent(d.filename)}/download" download="${d.filename}">Download</a>
         <button class="btn-danger" onclick="deleteDocument('${col}','${d.filename}')">Delete</button>
       </td>
     </tr>`).join('');
@@ -593,12 +601,28 @@ async function viewDocumentChunks(col, filename) {
     }
     const listEl = $('chunks-modal-list');
     listEl.innerHTML = '';
+    const chunkTypeBadge = (ct) => {
+      const map = {
+        picture:        ['#e0f2fe','#0369a1','\u{1F5BC} Image'],
+        parts_table:    ['#f3e8ff','#6b21a8','\u{1F4CB} Table'],
+        procedure_step: ['#fff7ed','#c2410c','\u{1F4DD} Step'],
+        text:           ['','',''],
+      };
+      const [bg, color, label] = map[ct] || ['','',''];
+      return label ? `<span style="background:${bg};color:${color};border-radius:10px;padding:1px 7px;font-size:.74rem;font-weight:600;margin-right:6px">${label}</span>` : '';
+    };
+    const chunkMeta = (c) => {
+      const parts = [];
+      if (c.section_title) parts.push(escHtml(c.section_title));
+      if (c.page_number != null) parts.push('p.' + c.page_number);
+      return parts.length ? `<span style="color:#94a3b8;font-size:.76rem;margin-left:6px">${parts.join(' · ')}</span>` : '';
+    };
     chunks.forEach(c => {
       const item = document.createElement('div');
       item.className = 'chunk-item';
       item.innerHTML = `
         <div class="chunk-header" onclick="this.parentElement.classList.toggle('open')">
-          <span>Chunk ${c.chunk_index}</span>
+          <span>${chunkTypeBadge(c.chunk_type)}Chunk ${c.chunk_index}${chunkMeta(c)}</span>
           <span style="color:#94a3b8;font-size:.78rem">${c.text.length} chars ▾</span>
         </div>
         <div class="chunk-body">${escHtml(c.text)}</div>`;

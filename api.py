@@ -293,6 +293,17 @@ async def upload_document(name: str, file: UploadFile) -> DocumentInfo:
     return DocumentInfo(filename=dest.name, size_bytes=dest.stat().st_size)
 
 
+@app.get("/collections/{name}/documents/{filename}/download")
+async def download_document(name: str, filename: str) -> FileResponse:
+    target = (_ROOT_DIR / "data" / name / filename).resolve()
+    # Guard against path traversal
+    if not str(target).startswith(str((_ROOT_DIR / "data" / name).resolve())):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    if not target.exists():
+        raise HTTPException(status_code=404, detail=f"Document '{filename}' not found")
+    return FileResponse(path=target, filename=filename, media_type="application/octet-stream")
+
+
 @app.delete("/collections/{name}/documents/{filename}", status_code=204)
 async def delete_document(name: str, filename: str) -> None:
     _get_service(name)
@@ -311,7 +322,16 @@ async def get_document_chunks(name: str, filename: str) -> list[DocumentChunk]:
     if "/" in filename or "\\" in filename or ".." in filename:
         raise HTTPException(status_code=400, detail="Invalid filename")
     chunks = rag.get_document_chunks(filename)
-    return [DocumentChunk(chunk_index=c["chunk_index"], text=c["text"]) for c in chunks]
+    return [
+        DocumentChunk(
+            chunk_index=c["chunk_index"],
+            text=c["text"],
+            chunk_type=c.get("chunk_type"),
+            section_title=c.get("section_title"),
+            page_number=c.get("page_number"),
+        )
+        for c in chunks
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -319,10 +339,10 @@ async def get_document_chunks(name: str, filename: str) -> list[DocumentChunk]:
 # ---------------------------------------------------------------------------
 
 
-async def _run_index(task_id: str, rag: RagService, entity_types: list[str] | None = None, mode: str = "all") -> None:
+async def _run_index(task_id: str, rag: RagService, entity_types: list[str] | None = None, mode: str = "all", force: bool = False) -> None:
     _tasks[task_id].status = "running"
     try:
-        await rag.index_documents(entity_types=entity_types, mode=mode)
+        await rag.index_documents(entity_types=entity_types, mode=mode, force=force)
         _tasks[task_id].status = "done"
     except Exception as exc:  # noqa: BLE001
         tb = traceback.extract_tb(exc.__traceback__)
@@ -352,9 +372,10 @@ async def trigger_index(
     rag = _get_service(name)
     entity_types = (body.entity_types if body else None) or None
     mode = (body.mode if body else None) or "all"
+    force = (body.force if body else False)
     task_id = str(uuid.uuid4())
     _tasks[task_id] = IndexStatusResponse(task_id=task_id, collection=name, status="pending")
-    background_tasks.add_task(_run_index, task_id, rag, entity_types, mode)
+    background_tasks.add_task(_run_index, task_id, rag, entity_types, mode, force)
     return IndexResponse(collection=name, status="pending", task_id=task_id)
 
 

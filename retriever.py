@@ -104,12 +104,29 @@ class RagRetriever:
             logger.info("LanceDB table '%s' not yet created", _TABLE_NAME)
 
     # ------------------------------------------------------------------
+    # Lazy table accessor
+    # ------------------------------------------------------------------
+
+    def _ensure_table(self) -> bool:
+        """Open the LanceDB table if it was created after this retriever was initialised.
+
+        Returns ``True`` if the table is (now) available, ``False`` otherwise.
+        """
+        if self._table is not None:
+            return True
+        if _TABLE_NAME in self._db.table_names():
+            self._table = self._db.open_table(_TABLE_NAME)
+            logger.info("Lazily opened LanceDB table '%s'", _TABLE_NAME)
+            return True
+        return False
+
+    # ------------------------------------------------------------------
     # Public search API
     # ------------------------------------------------------------------
 
     async def vector_search(self, query: str, top_k: int = _TOP_K) -> str:
         """Pure semantic similarity search — no graph context."""
-        if self._table is None:
+        if not self._ensure_table():
             return "No documents indexed yet. Call index_documents() first."
         context = await self._raw_vector_context(query, top_k)
         return await self._generate_response(query, context)
@@ -145,7 +162,7 @@ class RagRetriever:
 
     def get_document_chunks(self, filename: str) -> list[dict]:
         """Return all chunks stored in LanceDB for *filename*, sorted by chunk_index."""
-        if self._table is None:
+        if not self._ensure_table():
             return []
         try:
             df = self._table.to_pandas()
@@ -182,7 +199,7 @@ class RagRetriever:
 
     async def _raw_vector_results(self, query: str, top_k: int = _TOP_K) -> list[dict]:
         """Return raw LanceDB rows for *query*."""
-        if self._table is None:
+        if not self._ensure_table():
             return []
         query_emb = await self._query_embedding_service.generate_embeddings([query])
         vector = (

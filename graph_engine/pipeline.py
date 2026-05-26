@@ -135,8 +135,10 @@ class GraphPipeline:
         deduped = deduplicate_triples(raw_triples)
         logger.info("[%s] %d triples after deduplication", source_doc, len(deduped))
 
-        # 4. Store
+        # 4. Store — clear old triples for this (source_doc, method) first so
+        #    re-indexing fully replaces stale data instead of accumulating duplicates.
         _report(95, f"Storing to LanceDB — {source_doc}")
+        self._store.delete_by_source_and_method(source_doc, self._method)
         stored = self._store.add_triples(deduped)
         logger.info("[%s] %d triples stored", source_doc, stored)
 

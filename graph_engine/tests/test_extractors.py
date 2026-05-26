@@ -22,6 +22,7 @@ from io import BytesIO
 from graph_engine.models import Triple
 from graph_engine.extractors.spacy_extractor import SpacyExtractor
 from graph_engine.extractors.llm_extractor import LLMExtractor
+from graph_engine.extractors.hybrid_extractor import HybridExtractor
 
 
 # ---------------------------------------------------------------------------
@@ -168,3 +169,76 @@ class TestLLMExtractor:
             result = extractor.extract("Some text.", "doc1.txt")
 
         assert result == []
+
+
+# ---------------------------------------------------------------------------
+# Hybrid extractor — spaCy NER + LLM relation classification
+# ---------------------------------------------------------------------------
+
+# Text that produces spaCy dependency triples (subject–verb–object structure)
+# en_core_web_sm reliably finds: Google (ORG), YouTube (ORG), Apple (ORG), Beats (ORG/PRODUCT)
+# and dep-parsed triples: (Google, acquired, YouTube), (Apple, bought, Beats)
+_HYBRID_TEXT = "Google acquired YouTube. Apple bought Beats by Dre."
+_SPACY_KNOWN_NAMES = {"Google", "YouTube", "Apple", "Beats", "Beats by Dre"}
+
+# LLM deliberately returns lowercase / wrong type — should be overridden by node_lookup
+_HYBRID_LLM_RESPONSE = json.dumps([
+    {
+        "subject": "google",       # lowercase — spaCy has "Google"
+        "subject_type": "Other",   # wrong type — spaCy has "Organization"
+        "object": "youtube",       # lowercase — spaCy has "YouTube"
+        "object_type": "Other",    # wrong type — spaCy has "Organization"
+        "relation": "related_to",
+        "confidence": 0.8,
+    }
+])
+
+
+class TestHybridExtractor:
+
+    @pytest.fixture
+    def extractor(self):
+        try:
+            return HybridExtractor(
+                ollama_url="http://localhost:11434",
+                model="test-model",
+                fallback_threshold=2,
+            )
+        except OSError as e:
+            pytest.skip(f"spaCy model not installed: {e}")
+
+    def test_node_names_come_from_spacy_not_llm(self, extractor):
+        """
+        Node names in triples must match spaCy's extraction (proper case),
+        not the LLM's potentially mangled/lowercased names.
+        """
+        with patch("urllib.request.urlopen") as mock_open:
+            mock_open.return_value = _mock_urllib_response(_HYBRID_LLM_RESPONSE)
+            result = extractor.extract(_HYBRID_TEXT, "doc1.txt")
+
+        assert len(result) >= 1, "Expected at least one triple from hybrid extraction"
+        for triple in result:
+            assert triple.subject.name in _SPACY_KNOWN_NAMES, (
+                f"subject.name '{triple.subject.name}' should be spaCy's entity, not LLM's"
+            )
+            assert triple.object.name in _SPACY_KNOWN_NAMES, (
+                f"object.name '{triple.object.name}' should be spaCy's entity, not LLM's"
+            )
+
+    def test_node_types_come_from_spacy_not_llm(self, extractor):
+        """
+        Node types must use spaCy's NER mapping, not the LLM's reclassified type.
+        LLM returns 'Other' for Apple/Microsoft — spaCy maps ORG → 'Organization'.
+        """
+        with patch("urllib.request.urlopen") as mock_open:
+            mock_open.return_value = _mock_urllib_response(_HYBRID_LLM_RESPONSE)
+            result = extractor.extract(_HYBRID_TEXT, "doc1.txt")
+
+        assert len(result) >= 1
+        for triple in result:
+            assert triple.subject.type != "Other", (
+                f"subject.type should not be 'Other' — LLM's type leaked into node"
+            )
+            assert triple.object.type != "Other", (
+                f"object.type should not be 'Other' — LLM's type leaked into node"
+            )
