@@ -1,27 +1,34 @@
 [project]
 name = "fujinami"
 version = "0.1.0"
-description = "RAG service with Ollama and GraphRAG"
+description = "RAG service with Ollama and graph_engine"
 requires-python = ">=3.12"
 dependencies = [
     "agent-framework",
     "semantic-kernel[ollama]",
-    "graphrag",
     "lancedb",
     "pyarrow",
     "pypdf",
     "pymupdf",
     "python-docx",
+    "python-pptx",
+    "openpyxl",
     "pywin32",
     "poethepoet",
     "ragas>=0.2",
     "litellm",
     "openai",
+    "docling[asr]",
+    "transformers>=4.0,<5",
+    "spacy",
+    "langdetect",
+    "langchain-text-splitters",
 ]
 
 [tool.uv]
 package = false
 prerelease = "allow"
+link-mode = "copy"
 
 [tool.poe.tasks]
 install = "uv pip install -r requirements.txt"

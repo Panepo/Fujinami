@@ -7,10 +7,13 @@ Run from the workspace root:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import logging
 import re
 import shutil
 import sys
+import traceback
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -24,14 +27,15 @@ if str(_pkg_dir) not in sys.path:
 import csv
 import io
 
-from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from models import (
     CollectionCreateRequest,
     CollectionInfo,
     CollectionRenameRequest,
+    DocumentChunk,
     DocumentInfo,
     EvaluateBatchResponse,
     EvaluateBatchSampleResult,
@@ -79,9 +83,36 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 app = FastAPI(title="RAG API", lifespan=lifespan)
 
+_logger = logging.getLogger(__name__)
+
 _static_dir = _ROOT_DIR / "static"
 if _static_dir.exists():
     app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
+
+
+# ---------------------------------------------------------------------------
+# Global exception handler
+# ---------------------------------------------------------------------------
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    tb = traceback.extract_tb(exc.__traceback__)
+    origin = tb[-1] if tb else None
+    location = (
+        f"{origin.filename}:{origin.lineno} in {origin.name}"
+        if origin
+        else "unknown location"
+    )
+    _logger.exception("Unhandled error at %s – %s: %s", location, type(exc).__name__, exc)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": str(exc),
+            "type": type(exc).__name__,
+            "location": location,
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -130,11 +161,22 @@ def _index_status(name: str) -> str:
                 prev = stored.get(f.name)
                 if prev is None:
                     return "new_docs"
-                stat = f.stat()
-                if stat.st_mtime != prev["mtime"] or stat.st_size != prev["size"]:
+                current_hash = hashlib.sha256(f.read_bytes()).hexdigest()
+                if current_hash != prev:
                     return "new_docs"
 
     return "indexed"
+
+
+def _get_index_flags(name: str) -> dict:
+    """Return ``{vector_indexed, graph_indexed}`` for a collection."""
+    flags_path = _ROOT_DIR / "ragdata" / name / "index_flags.json"
+    if not flags_path.exists():
+        return {"vector_indexed": False, "graph_indexed": False}
+    try:
+        return json.loads(flags_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {"vector_indexed": False, "graph_indexed": False}
 
 
 def _validate_name(name: str) -> None:
@@ -157,10 +199,17 @@ async def serve_index() -> FileResponse:
 
 @app.get("/collections", response_model=list[CollectionInfo])
 async def list_collections() -> list[CollectionInfo]:
-    return [
-        CollectionInfo(name=name, doc_count=_doc_count(name), index_status=_index_status(name))
-        for name in sorted(_registry)
-    ]
+    result = []
+    for name in sorted(_registry):
+        flags = _get_index_flags(name)
+        result.append(CollectionInfo(
+            name=name,
+            doc_count=_doc_count(name),
+            index_status=_index_status(name),
+            vector_indexed=flags.get("vector_indexed", False),
+            graph_indexed=flags.get("graph_indexed", False),
+        ))
+    return result
 
 
 @app.post("/collections", response_model=CollectionInfo, status_code=201)
@@ -244,6 +293,46 @@ async def upload_document(name: str, file: UploadFile) -> DocumentInfo:
     return DocumentInfo(filename=dest.name, size_bytes=dest.stat().st_size)
 
 
+@app.get("/collections/{name}/documents/{filename}/download")
+async def download_document(name: str, filename: str) -> FileResponse:
+    target = (_ROOT_DIR / "data" / name / filename).resolve()
+    # Guard against path traversal
+    if not str(target).startswith(str((_ROOT_DIR / "data" / name).resolve())):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    if not target.exists():
+        raise HTTPException(status_code=404, detail=f"Document '{filename}' not found")
+    return FileResponse(path=target, filename=filename, media_type="application/octet-stream")
+
+
+@app.get("/collections/{name}/documents/{filename}/embedded")
+async def download_embedded(name: str, filename: str) -> FileResponse:
+    """Return the per-document ``embedded.json`` as a file download.
+
+    The file is written by the indexer after a document is embedded.
+    Returns ``404`` if the document has not yet been indexed.
+    """
+    _get_service(name)
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    doc_stem = Path(filename).stem
+    embedded_dir = (_ROOT_DIR / "ragdata" / name / "embedded").resolve()
+    target = (embedded_dir / f"{doc_stem}.embedded.json").resolve()
+    # Guard against path traversal
+    if not str(target).startswith(str(embedded_dir)):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    if not target.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Embedded JSON for '{filename}' not found (document not yet indexed)",
+        )
+    return FileResponse(
+        path=target,
+        filename=f"{doc_stem}.embedded.json",
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{doc_stem}.embedded.json"'},
+    )
+
+
 @app.delete("/collections/{name}/documents/{filename}", status_code=204)
 async def delete_document(name: str, filename: str) -> None:
     _get_service(name)
@@ -256,19 +345,51 @@ async def delete_document(name: str, filename: str) -> None:
     target.unlink()
 
 
+@app.get("/collections/{name}/documents/{filename}/chunks", response_model=list[DocumentChunk])
+async def get_document_chunks(name: str, filename: str) -> list[DocumentChunk]:
+    rag = _get_service(name)
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    chunks = rag.get_document_chunks(filename)
+    return [
+        DocumentChunk(
+            chunk_index=c["chunk_index"],
+            text=c["text"],
+            chunk_type=c.get("chunk_type"),
+            section_title=c.get("section_title"),
+            page_number=c.get("page_number"),
+        )
+        for c in chunks
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Index endpoints
 # ---------------------------------------------------------------------------
 
 
-async def _run_index(task_id: str, rag: RagService, entity_types: list[str] | None = None) -> None:
+async def _run_index(task_id: str, rag: RagService, entity_types: list[str] | None = None, mode: str = "all", force: bool = False) -> None:
     _tasks[task_id].status = "running"
     try:
-        await rag.index_documents(entity_types=entity_types)
+        await rag.index_documents(entity_types=entity_types, mode=mode, force=force)
         _tasks[task_id].status = "done"
     except Exception as exc:  # noqa: BLE001
+        tb = traceback.extract_tb(exc.__traceback__)
+        origin = tb[-1] if tb else None
+        location = (
+            f"{origin.filename}:{origin.lineno} in {origin.name}"
+            if origin
+            else "unknown location"
+        )
+        _logger.exception(
+            "Index task %s failed at %s – %s: %s",
+            task_id,
+            location,
+            type(exc).__name__,
+            exc,
+        )
         _tasks[task_id].status = "error"
-        _tasks[task_id].detail = str(exc)
+        _tasks[task_id].detail = f"{type(exc).__name__}: {exc} (at {location})"
 
 
 @app.post("/collections/{name}/index", response_model=IndexResponse, status_code=202)
@@ -279,9 +400,11 @@ async def trigger_index(
 ) -> IndexResponse:
     rag = _get_service(name)
     entity_types = (body.entity_types if body else None) or None
+    mode = (body.mode if body else None) or "all"
+    force = (body.force if body else False)
     task_id = str(uuid.uuid4())
     _tasks[task_id] = IndexStatusResponse(task_id=task_id, collection=name, status="pending")
-    background_tasks.add_task(_run_index, task_id, rag, entity_types)
+    background_tasks.add_task(_run_index, task_id, rag, entity_types, mode, force)
     return IndexResponse(collection=name, status="pending", task_id=task_id)
 
 
@@ -316,6 +439,33 @@ async def _stream_answer(
     graphrag_context: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """Yield SSE events: chunks (optional), graphrag (optional), token*, sources (optional), done."""
+    try:
+        async for event in _stream_answer_inner(rag, query_req, sources, vector_context, graphrag_context):
+            yield event
+    except Exception as exc:  # noqa: BLE001
+        tb = traceback.extract_tb(exc.__traceback__)
+        origin = tb[-1] if tb else None
+        location = (
+            f"{origin.filename}:{origin.lineno} in {origin.name}"
+            if origin
+            else "unknown location"
+        )
+        _logger.exception(
+            "Streaming query failed at %s – %s: %s",
+            location,
+            type(exc).__name__,
+            exc,
+        )
+        yield f"event: error\ndata: {json.dumps({'detail': str(exc), 'type': type(exc).__name__, 'location': location})}\n\n"
+
+
+async def _stream_answer_inner(
+    rag: RagService,
+    query_req: QueryRequest,
+    sources: list[SourceChunk] | None,
+    vector_context: str | None = None,
+    graphrag_context: str | None = None,
+) -> AsyncGenerator[str, None]:
     from semantic_kernel.contents import ChatHistory  # noqa: PLC0415
 
     # Emit retrieved context before tokens so the UI can display it immediately
@@ -325,7 +475,7 @@ async def _stream_answer(
     if graphrag_context is not None:
         yield f"event: graphrag\ndata: {json.dumps(graphrag_context)}\n\n"
 
-    if query_req.method == "global":
+    if query_req.method == "graph":
         # GraphRAG global result IS the answer
         answer = graphrag_context or await rag.global_search(query_req.query)
         yield f"event: token\ndata: {json.dumps(answer)}\n\n"
@@ -337,9 +487,14 @@ async def _stream_answer(
         if query_req.method == "hybrid":
             if graphrag_context is None:
                 graphrag_context = await rag._graphrag_search(query_req.query, method="local")
-            context = f"Vector Search Results:\n{vector_context}\n\nGraph Search Results:\n{graphrag_context}"
+            parts_ctx: list[str] = []
+            if vector_context:
+                parts_ctx.append(f"Vector Search Results:\n{vector_context}")
+            if graphrag_context:
+                parts_ctx.append(f"Graph Search Results:\n{graphrag_context}")
+            context = "\n\n".join(parts_ctx)
         else:
-            context = vector_context
+            context = vector_context or ""
 
         history = ChatHistory()
         history.add_system_message(
@@ -374,8 +529,8 @@ async def query_collection(name: str, body: QueryRequest):
     vector_context: str | None = None
     graphrag_context: str | None = None
 
-    # Fetch vector chunks for non-global methods
-    if body.method != "global":
+    # Fetch vector chunks for non-graph methods
+    if body.method != "graph":
         raw_rows = await rag._raw_vector_results(body.query, body.top_k)
         vector_context = "\n\n".join(r.get("text", "") for r in raw_rows)
         sources = []
@@ -396,7 +551,7 @@ async def query_collection(name: str, body: QueryRequest):
     # Fetch GraphRAG context for hybrid and global methods
     if body.method == "hybrid":
         graphrag_context = await rag._graphrag_search(body.query, method="local")
-    elif body.method == "global":
+    elif body.method == "graph":
         graphrag_context = await rag._graphrag_search(body.query, method="global")
 
     if body.stream:
@@ -408,10 +563,15 @@ async def query_collection(name: str, body: QueryRequest):
     # Non-streaming path — generate answer from pre-fetched context
     if body.method == "vector":
         answer = await rag._generate_response(body.query, vector_context or "")
-    elif body.method == "global":
+    elif body.method == "graph":
         answer = graphrag_context or ""
     else:  # hybrid
-        merged = f"Vector Search Results:\n{vector_context}\n\nGraph Search Results:\n{graphrag_context}"
+        parts: list[str] = []
+        if vector_context:
+            parts.append(f"Vector Search Results:\n{vector_context}")
+        if graphrag_context:
+            parts.append(f"Graph Search Results:\n{graphrag_context}")
+        merged = "\n\n".join(parts)
         answer = await rag._generate_response(body.query, merged)
 
     return QueryResponse(
@@ -421,6 +581,48 @@ async def query_collection(name: str, body: QueryRequest):
         sources=sources,
         graphrag_context=graphrag_context,
     )
+
+
+# ---------------------------------------------------------------------------
+# Graph endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.get("/collections/{name}/graph/stats")
+async def get_graph_stats(name: str) -> dict:
+    """Return triple count for the collection's graph store."""
+    from graph_engine.store import LanceDBGraphStore  # noqa: PLC0415
+
+    svc = _get_service(name)
+    lance_path = svc._retriever._lance_path
+    try:
+        store = LanceDBGraphStore(lance_path)
+        return {"triple_count": store.count()}
+    except Exception:
+        return {"triple_count": 0}
+
+
+@app.get("/collections/{name}/graph")
+async def get_graph_triples(
+    name: str,
+    source_doc: str | None = None,
+    subject_type: str | None = None,
+    predicate: str | None = None,
+) -> list[dict]:
+    """Return triples from the knowledge graph, with optional filters."""
+    from graph_engine.store import LanceDBGraphStore  # noqa: PLC0415
+
+    svc = _get_service(name)
+    lance_path = svc._retriever._lance_path
+    try:
+        store = LanceDBGraphStore(lance_path)
+        return store.get_triples(
+            source_doc=source_doc or None,
+            subject_type=subject_type or None,
+            predicate=predicate or None,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -519,3 +721,44 @@ async def evaluate_batch(
         for s, scores in zip(samples, per_sample_scores)
     ]
     return EvaluateBatchResponse(results=results)
+
+
+# ---------------------------------------------------------------------------
+# Environment config endpoint
+# ---------------------------------------------------------------------------
+
+_ENV_VARS: list[dict] = [
+    # key, default (None = required), description
+    {"key": "OLLAMA_INDEX_URL",  "default": None,        "description": "Ollama server used for indexing / embeddings"},
+    {"key": "OLLAMA_CHAT_URL",   "default": None,        "description": "Ollama server used for chat / query"},
+    {"key": "CHAT_MODEL",        "default": None,        "description": "Model used for answering queries"},
+    {"key": "EMBEDDING_MODEL",   "default": None,        "description": "Embedding model for vector search"},
+    {"key": "VLM_MODEL",         "default": None,        "description": "Vision-language model for image documents"},
+    {"key": "VLM_TIMEOUT",       "default": "180",       "description": "Timeout (s) for VLM requests"},
+    {"key": "INDEX_MODEL",       "default": "",          "description": "Override model used during indexing"},
+    {"key": "CHUNK_SIZE",        "default": "800",       "description": "Token size per chunk"},
+    {"key": "CHUNK_OVERLAP",     "default": "80",        "description": "Overlap between consecutive chunks"},
+    {"key": "GRAPH_EXTRACTOR",   "default": "hybrid",    "description": "Entity extractor: hybrid | llm | spacy"},
+    {"key": "EXTRACT_MODEL",     "default": "",          "description": "Model used by the LLM graph extractor"},
+    {"key": "RAGAS_MODEL",       "default": "",          "description": "Model used for RAGAS evaluation"},
+    {"key": "OLLAMA_TIMEOUT",    "default": "1800",      "description": "Timeout (s) for Ollama API calls"},
+]
+
+
+@app.get("/api/env")
+async def get_env_config() -> list[dict]:
+    """Return the current values of known application environment variables."""
+    import os  # noqa: PLC0415
+
+    result = []
+    for entry in _ENV_VARS:
+        key = entry["key"]
+        raw = os.environ.get(key)
+        result.append({
+            "key": key,
+            "value": raw if raw is not None else entry["default"],
+            "set": raw is not None,
+            "default": entry["default"],
+            "description": entry["description"],
+        })
+    return result

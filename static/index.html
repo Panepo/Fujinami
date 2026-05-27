@@ -41,9 +41,11 @@
     .badge-running  { background: #dbeafe; color: #1e40af; }
     .badge-done     { background: #dcfce7; color: #166534; }
     .badge-error    { background: #fee2e2; color: #991b1b; }
-    .badge-indexed    { background: #dcfce7; color: #166534; }
-    .badge-not_indexed { background: #f1f5f9; color: #64748b; }
-    .badge-new_docs   { background: #fff7ed; color: #c2410c; }
+    .badge-indexed      { background: #dcfce7; color: #166534; }
+    .badge-not_indexed  { background: #f1f5f9; color: #64748b; }
+    .badge-new_docs     { background: #fff7ed; color: #c2410c; }
+    .badge-vector_only  { background: #dbeafe; color: #1e40af; }
+    .badge-graph_only   { background: #f3e8ff; color: #6b21a8; }
     #answer-box { background: #f8f8fc; border-radius: 4px; padding: 10px; font-size: .88rem; white-space: pre-wrap; min-height: 80px; margin-top: 10px; }
     .thinking-indicator { display: flex; align-items: center; gap: 8px; color: #64748b; font-size: .85rem; font-style: italic; }
     .thinking-dots span { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #94a3b8; animation: thinking-bounce .9s ease-in-out infinite; }
@@ -63,6 +65,16 @@
     .radio-group { display: flex; gap: 12px; align-items: center; margin-top: 4px; font-size: .85rem; }
     .radio-group label { display: flex; align-items: center; gap: 4px; }
     @media(max-width: 700px) { main { grid-template-columns: 1fr; } }
+    .btn-dl { display: inline-block; text-decoration: none; vertical-align: middle; padding: 5px 12px; font-size: .85rem; border-radius: 4px; cursor: pointer; border: none; }
+
+    /* ---- Env config ---- */
+    .env-table td:first-child { font-family: monospace; font-size: .82rem; font-weight: 600; color: #1a1a2e; white-space: nowrap; }
+    .env-table td:nth-child(2) { font-family: monospace; font-size: .82rem; word-break: break-all; }
+    .env-table td:nth-child(3) { font-size: .78rem; color: #64748b; }
+    .badge-env-set  { background: #dcfce7; color: #166534; }
+    .badge-env-default { background: #f1f5f9; color: #64748b; }
+    .badge-env-missing { background: #fee2e2; color: #991b1b; }
+    #env-toggle-btn { font-size: .8rem; padding: 3px 10px; }
 
     /* ---- Verification tab ---- */
     .verify-layout { display: flex; min-height: calc(100vh - 96px); }
@@ -99,6 +111,12 @@
     .dropzone { border: 2px dashed #aab; border-radius: 8px; padding: 2rem; text-align: center; color: #667; cursor: pointer; background: #fff; max-width: 820px; }
     .dropzone.dragover { border-color: #0f3460; background: #eef3fb; }
     .dropzone input[type="file"] { display: none; }
+    /* ---- Chunks modal ---- */
+    #chunks-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:1000; overflow-y:auto; }
+    .chunks-modal-box { background:#fff; border-radius:8px; max-width:800px; margin:40px auto 40px; padding:20px; position:relative; }
+    .chunks-modal-box h3 { font-size:.95rem; color:#16213e; margin-bottom:6px; padding-right:24px; word-break:break-all; }
+    .chunks-modal-close { position:absolute; top:10px; right:12px; background:none; border:none; font-size:1.3rem; line-height:1; cursor:pointer; color:#666; padding:0 4px; }
+    .chunks-modal-close:hover { color:#c0392b; }
     .format-hint { background: #eef3fb; border-left: 3px solid #0f3460; padding: 8px 12px; border-radius: 0 5px 5px 0; font-size: .8rem; color: #334; margin-top: 12px; max-width: 820px; }
     .format-hint code { background: #dce8f8; border-radius: 3px; padding: 1px 4px; font-size: .78rem; }
     pre.code-example { background: #1a1a2e; color: #cfe2ff; border-radius: 5px; padding: 10px 14px; font-size: .78rem; margin-top: 4px; overflow-x: auto; }
@@ -108,19 +126,27 @@
     .expand-btn { background: none; border: none; cursor: pointer; color: #0f3460; font-size: .75rem; font-weight: 600; }
     .sample-detail { display: none; white-space: pre-wrap; font-size: .78rem; color: #445; background: #f8f9fb; border-radius: 4px; padding: 6px; margin-top: 4px; }
     .sample-detail.open { display: block; }
+    button:disabled { opacity: .65; cursor: not-allowed; }
     .btn-send-verify { background: #166534; color: #fff; margin-top: 8px; font-size: .82rem; padding: 4px 12px; }
     .btn-send-verify:hover { background: #15803d; }
     #verify-toast { position: fixed; bottom: 1.5rem; right: 1.5rem; background: #c0392b; color: #fff; padding: 10px 14px; border-radius: 7px; font-size: .875rem; max-width: 380px; opacity: 0; pointer-events: none; transition: opacity .25s; z-index: 999; }
     #verify-toast.show { opacity: 1; pointer-events: auto; }
     .verify-spinner { display: none; width: 16px; height: 16px; border: 2px solid rgba(255,255,255,.4); border-top-color: #fff; border-radius: 50%; animation: spin .65s linear infinite; vertical-align: middle; margin-right: 4px; }
     .btn-evaluating .verify-spinner { display: inline-block; }
+    /* Graph tab */
+    .graph-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: .78rem; color: #444; margin-top: 8px; }
+    .graph-legend-item { display: flex; align-items: center; gap: 4px; }
+    .graph-legend-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; border: 1px solid rgba(0,0,0,.15); }
+    #graph-network { overflow: hidden; }
   </style>
+  <script src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
 </head>
 <body>
 <header>Fujinami RAG Service</header>
 <nav class="tab-bar">
   <button class="tab-btn active" onclick="switchTab('manage')">Manage</button>
   <button class="tab-btn" onclick="switchTab('query')">Query</button>
+  <button class="tab-btn" onclick="switchTab('graph')">Graph</button>
   <button class="tab-btn" onclick="switchTab('verify')">Verification</button>
 </nav>
 
@@ -168,6 +194,21 @@
       <p class="status-msg" id="doc-status"></p>
     </section>
 
+    <!-- ===== Env Config ===== -->
+    <section id="panel-env" style="grid-column: 1 / -1">
+      <h2 style="display:flex;align-items:center;justify-content:space-between">
+        Environment Config
+        <button id="env-toggle-btn" class="btn-primary" onclick="toggleEnvPanel()">Show</button>
+      </h2>
+      <div id="env-panel-body" style="display:none;margin-top:8px">
+        <p class="status-msg" id="env-status"></p>
+        <table class="env-table" id="tbl-env" style="margin-top:6px">
+          <thead><tr><th>Variable</th><th>Value</th><th>Description</th><th>Status</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
     <!-- ===== Index ===== -->
     <section id="panel-index" style="grid-column: 1 / -1">
       <h2>Index</h2>
@@ -175,6 +216,14 @@
         <div>
           <label>Collection</label>
           <select id="sel-idx-col"></select>
+        </div>
+        <div>
+          <label>Index mode</label>
+          <div class="radio-group">
+            <label><input type="radio" name="idx-mode" value="all" checked /> All</label>
+            <label><input type="radio" name="idx-mode" value="vector" /> Vector only</label>
+            <label><input type="radio" name="idx-mode" value="graph" /> Graph only</label>
+          </div>
         </div>
         <button class="btn-primary" onclick="triggerIndex()">Run Index</button>
       </div>
@@ -215,7 +264,7 @@
       <div class="form-row">
         <div>
           <label>Collection</label>
-          <select id="sel-qry-col"></select>
+          <select id="sel-qry-col" onchange="updateQueryMethodAvailability()"></select>
         </div>
       </div>
       <label style="font-size:.82rem;margin-top:10px;display:block">Query</label>
@@ -225,14 +274,14 @@
           <label>Method</label>
           <div class="radio-group">
             <label><input type="radio" name="qry-method" value="hybrid" checked /> hybrid</label>
-            <label><input type="radio" name="qry-method" value="vector" /> vector</label>
-            <label><input type="radio" name="qry-method" value="global" /> global</label>
+            <label><input type="radio" name="qry-method" value="vector" /> vector only</label>
+            <label><input type="radio" name="qry-method" value="graph" /> graph only</label>
           </div>
         </div>
         <div style="flex:0;white-space:nowrap">
           <label><input type="checkbox" id="chk-stream" /> stream</label>
         </div>
-        <button class="btn-primary" onclick="submitQuery()">Ask</button>
+        <button class="btn-primary" id="btn-ask" onclick="submitQuery()"><span class="verify-spinner" id="spin-ask"></span>Ask</button>
       </div>
       <div id="answer-box"></div>
       <div id="query-stats"></div>
@@ -241,7 +290,7 @@
         <summary>Context sent to LLM</summary>
         <div id="context-chunks-list" style="margin-top:6px"></div>
         <div id="graphrag-context-wrap" style="display:none;margin-top:10px">
-          <p style="font-size:.8rem;font-weight:600;color:#555;margin-bottom:4px">GraphRAG context</p>
+          <p style="font-size:.8rem;font-weight:600;color:#555;margin-bottom:4px">Graph context</p>
           <div id="graphrag-context-box" class="graphrag-box"></div>
         </div>
       </details>
@@ -254,6 +303,51 @@
       </details>
     </section>
 
+  </main>
+</div>
+
+<!-- ===== Tab: Graph ===== -->
+<div id="tab-graph" class="tab-panel">
+  <main class="single">
+    <section>
+      <h2>Knowledge Graph</h2>
+      <div class="form-row">
+        <div>
+          <label>Collection</label>
+          <select id="sel-graph-col" onchange="loadGraphStats()"></select>
+        </div>
+        <button class="btn-primary" onclick="loadGraph()">Load Graph</button>
+      </div>
+      <div id="graph-stats" style="font-size:.82rem;color:#64748b;margin-top:6px"></div>
+      <div class="form-row" style="margin-top:8px">
+        <div>
+          <label>Filter by source doc</label>
+          <input type="text" id="filter-source-doc" placeholder="filename.txt" />
+        </div>
+        <div>
+          <label>Subject type</label>
+          <select id="filter-subject-type"><option value="">All types</option></select>
+        </div>
+        <div>
+          <label>Predicate</label>
+          <select id="filter-predicate"><option value="">All predicates</option></select>
+        </div>
+      </div>
+      <!-- vis.js network diagram -->
+      <div id="graph-network" style="width:100%;height:480px;border:1px solid #e2e8f0;border-radius:6px;margin-top:12px;background:#fafafa;position:relative">
+        <p id="graph-network-placeholder" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#aaa;font-size:.88rem;pointer-events:none">Select a collection and click Load Graph</p>
+      </div>
+      <div id="graph-legend" class="graph-legend"></div>
+      <!-- Triples table (collapsible) -->
+      <details style="margin-top:12px">
+        <summary style="font-size:.85rem;color:#0f3460;cursor:pointer">Triples table</summary>
+        <table id="tbl-triples" style="margin-top:8px;font-size:.82rem">
+          <thead><tr><th>Subject</th><th>Predicate</th><th>Object</th><th>Weight</th><th>Source</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </details>
+      <p class="status-msg" id="graph-status"></p>
+    </section>
   </main>
 </div>
 
@@ -334,6 +428,16 @@
   </div>
 </div>
 
+<!-- ===== Chunks Modal ===== -->
+<div id="chunks-modal" onclick="if(event.target===this)closeChunksModal()">
+  <div class="chunks-modal-box">
+    <button class="chunks-modal-close" onclick="closeChunksModal()">&times;</button>
+    <h3 id="chunks-modal-title"></h3>
+    <p id="chunks-modal-status" style="font-size:.82rem;color:#888;margin-bottom:10px"></p>
+    <div id="chunks-modal-list"></div>
+  </div>
+</div>
+
 <div id="verify-toast"></div>
 
 <script>
@@ -387,20 +491,30 @@ async function loadCollections() {
   const cols = await api('GET', '/collections');
   renderCollectionsTable(cols);
   populateSelects(cols.map(c => c.name));
+  updateQueryMethodAvailability();
 }
 
-function indexStatusBadge(status) {
-  const labels = { indexed: 'Indexed', not_indexed: 'Not Indexed', new_docs: 'New Docs' };
-  return `<span class="badge badge-${status}">${labels[status] ?? status}</span>`;
+function indexStatusBadge(vectorIndexed, graphIndexed) {
+  let status, label;
+  if (vectorIndexed && graphIndexed)       { status = 'indexed';      label = 'Indexed'; }
+  else if (vectorIndexed && !graphIndexed) { status = 'vector_only';  label = 'Vector Only'; }
+  else if (!vectorIndexed && graphIndexed) { status = 'graph_only';   label = 'Graph Only'; }
+  else                                     { status = 'not_indexed';  label = 'Not Indexed'; }
+  return `<span class="badge badge-${status}">${label}</span>`;
 }
 
 function renderCollectionsTable(cols) {
+  // Refresh per-collection index flags for the query tab
+  _collectionFlags = {};
+  cols.forEach(c => {
+    _collectionFlags[c.name] = { vector_indexed: c.vector_indexed ?? false, graph_indexed: c.graph_indexed ?? false };
+  });
   const tbody = $('tbl-collections').querySelector('tbody');
   tbody.innerHTML = cols.map(c => `
     <tr>
       <td>${c.name}</td>
       <td>${c.doc_count}</td>
-      <td>${indexStatusBadge(c.index_status)}</td>
+      <td>${indexStatusBadge(c.vector_indexed, c.graph_indexed)}</td>
       <td style="white-space:nowrap">
         <button class="btn-warn" onclick="renameCollection('${c.name}')">Rename</button>
         <button class="btn-danger" onclick="deleteCollection('${c.name}')">Delete</button>
@@ -409,7 +523,7 @@ function renderCollectionsTable(cols) {
 }
 
 function populateSelects(names) {
-  ['sel-doc-col','sel-idx-col','sel-qry-col'].forEach(id => {
+  ['sel-doc-col','sel-idx-col','sel-qry-col','sel-graph-col'].forEach(id => {
     const el = $(id);
     const cur = el.value;
     el.innerHTML = names.map(n => `<option${n===cur?' selected':''}>${n}</option>`).join('');
@@ -465,8 +579,62 @@ function renderDocumentsTable(col, docs) {
     <tr>
       <td>${d.filename}</td>
       <td>${fmt(d.size_bytes)}</td>
-      <td><button class="btn-danger" onclick="deleteDocument('${col}','${d.filename}')">Delete</button></td>
+      <td style="white-space:nowrap">
+        <button class="btn-primary" onclick="viewDocumentChunks('${col}','${d.filename}')">View</button>
+        <a class="btn-primary btn-dl" href="/collections/${col}/documents/${encodeURIComponent(d.filename)}/download" download="${d.filename}">Download</a>
+        <button class="btn-danger" onclick="deleteDocument('${col}','${d.filename}')">Delete</button>
+      </td>
     </tr>`).join('');
+}
+
+async function viewDocumentChunks(col, filename) {
+  $('chunks-modal-title').textContent = `Chunks — ${filename}`;
+  $('chunks-modal-status').textContent = 'Loading…';
+  $('chunks-modal-list').innerHTML = '';
+  $('chunks-modal').style.display = 'block';
+  try {
+    const chunks = await api('GET', `/collections/${col}/documents/${encodeURIComponent(filename)}/chunks`);
+    $('chunks-modal-status').textContent = `${chunks.length} chunk${chunks.length !== 1 ? 's' : ''}`;
+    if (chunks.length === 0) {
+      $('chunks-modal-list').innerHTML = '<p style="color:#888;font-size:.85rem">No chunks indexed yet for this document.</p>';
+      return;
+    }
+    const listEl = $('chunks-modal-list');
+    listEl.innerHTML = '';
+    const chunkTypeBadge = (ct) => {
+      const map = {
+        picture:        ['#e0f2fe','#0369a1','\u{1F5BC} Image'],
+        parts_table:    ['#f3e8ff','#6b21a8','\u{1F4CB} Table'],
+        procedure_step: ['#fff7ed','#c2410c','\u{1F4DD} Step'],
+        text:           ['','',''],
+      };
+      const [bg, color, label] = map[ct] || ['','',''];
+      return label ? `<span style="background:${bg};color:${color};border-radius:10px;padding:1px 7px;font-size:.74rem;font-weight:600;margin-right:6px">${label}</span>` : '';
+    };
+    const chunkMeta = (c) => {
+      const parts = [];
+      if (c.section_title) parts.push(escHtml(c.section_title));
+      if (c.page_number != null) parts.push('p.' + c.page_number);
+      return parts.length ? `<span style="color:#94a3b8;font-size:.76rem;margin-left:6px">${parts.join(' · ')}</span>` : '';
+    };
+    chunks.forEach(c => {
+      const item = document.createElement('div');
+      item.className = 'chunk-item';
+      item.innerHTML = `
+        <div class="chunk-header" onclick="this.parentElement.classList.toggle('open')">
+          <span>${chunkTypeBadge(c.chunk_type)}Chunk ${c.chunk_index}${chunkMeta(c)}</span>
+          <span style="color:#94a3b8;font-size:.78rem">${c.text.length} chars ▾</span>
+        </div>
+        <div class="chunk-body">${escHtml(c.text)}</div>`;
+      listEl.appendChild(item);
+    });
+  } catch(e) {
+    $('chunks-modal-status').textContent = 'Error: ' + e.message;
+  }
+}
+
+function closeChunksModal() {
+  $('chunks-modal').style.display = 'none';
 }
 
 async function uploadDocument() {
@@ -532,6 +700,7 @@ async function triggerIndex() {
     document.querySelectorAll('input[name="entity-type"]:checked')
   ).map(el => el.value);
   const entityTypes = selectedTypes.length > 0 ? selectedTypes : null;
+  const mode = document.querySelector('input[name="idx-mode"]:checked')?.value ?? 'all';
   // cancel any existing poll for this collection
   if (_activeJobs[col]) { clearInterval(_activeJobs[col].timer); }
   $('idx-status').innerHTML = badgeHtml('pending');
@@ -539,7 +708,7 @@ async function triggerIndex() {
   _activeJobs[col] = { taskId: null, status: 'pending', detail: '', timer: null, errors: 0, startedAt: Date.now() };
   renderActiveJobs();
   try {
-    const res = await api('POST', `/collections/${col}/index`, { entity_types: entityTypes });
+    const res = await api('POST', `/collections/${col}/index`, { entity_types: entityTypes, mode });
     $('idx-task-id').textContent = 'task_id: ' + res.task_id;
     _activeJobs[col].taskId = res.task_id;
     pollIndexStatus(col, res.task_id);
@@ -595,6 +764,32 @@ function pollIndexStatus(col, taskId) {
 /* -----------------------------------------------------------------------
    Query
 ----------------------------------------------------------------------- */
+let _collectionFlags = {};  // name → { vector_indexed, graph_indexed }
+
+function updateQueryMethodAvailability() {
+  const col = $('sel-qry-col').value;
+  const flags = _collectionFlags[col] || { vector_indexed: false, graph_indexed: false };
+  const rules = {
+    vector: flags.vector_indexed,
+    graph: flags.graph_indexed,
+    hybrid: flags.vector_indexed && flags.graph_indexed,
+  };
+  let checkedDisabled = false;
+  document.querySelectorAll('input[name="qry-method"]').forEach(r => {
+    const enabled = rules[r.value] ?? true;
+    r.disabled = !enabled;
+    const lbl = r.closest('label');
+    lbl.style.opacity = enabled ? '1' : '0.4';
+    lbl.title = enabled ? '' : 'Not indexed yet';
+    if (r.checked && !enabled) checkedDisabled = true;
+  });
+  // If the selected method was just disabled, switch to the first available one
+  if (checkedDisabled) {
+    const first = document.querySelector('input[name="qry-method"]:not(:disabled)');
+    if (first) first.checked = true;
+  }
+}
+
 function fmtMs(ms) {
   return ms < 1000 ? ms + ' ms' : (ms / 1000).toFixed(2) + ' s';
 }
@@ -638,6 +833,7 @@ function renderGraphragContext(text) {
   $('graphrag-context-box').textContent = text;
   $('graphrag-context-wrap').style.display = '';
   $('context-detail').style.display = '';
+  $('context-detail').open = true;
 }
 
 function escHtml(str) {
@@ -660,10 +856,18 @@ async function submitQuery() {
   $('tbl-sources').querySelector('tbody').innerHTML = '';
   clearContextPanel();
 
-  if (stream) {
-    await streamQuery(col, query, method);
-  } else {
-    await nonStreamQuery(col, query, method);
+  const btnAsk = $('btn-ask');
+  btnAsk.disabled = true;
+  btnAsk.classList.add('btn-evaluating');
+  try {
+    if (stream) {
+      await streamQuery(col, query, method);
+    } else {
+      await nonStreamQuery(col, query, method);
+    }
+  } finally {
+    btnAsk.disabled = false;
+    btnAsk.classList.remove('btn-evaluating');
   }
 }
 
@@ -678,7 +882,8 @@ async function nonStreamQuery(col, query, method) {
       renderContextChunks(res.sources);
       renderSources(res.sources);
     }
-    if (res.graphrag_context) {
+    // For graph-only method the answer IS the graph context — skip duplicate display
+    if (res.graphrag_context && method !== 'graph') {
       renderGraphragContext(res.graphrag_context);
     }
     _lastQueryData = { query, answer: res.answer, sources: res.sources || [] };
@@ -733,7 +938,8 @@ async function streamQuery(col, query, method) {
         } else if (eventType === 'chunks') {
           try { renderContextChunks(JSON.parse(data)); } catch(_) {}
         } else if (eventType === 'graphrag') {
-          try { renderGraphragContext(JSON.parse(data)); } catch(_) {}
+          // For graph-only method the answer IS the graph context — skip duplicate display
+          if (method !== 'graph') { try { renderGraphragContext(JSON.parse(data)); } catch(_) {} }
         } else if (eventType === 'sources') {
           try { streamedSources = JSON.parse(data); renderSources(streamedSources); } catch(_) {}
         }
@@ -761,6 +967,136 @@ function renderSources(sources) {
 }
 
 /* -----------------------------------------------------------------------
+   Graph tab
+----------------------------------------------------------------------- */
+const TYPE_COLORS = {
+  Person:'#4a90d9', Organization:'#e67e22', Location:'#27ae60', Date:'#8e44ad',
+  Event:'#e74c3c', Concept:'#16a085', Device:'#2980b9', Component:'#f39c12',
+  Specification:'#1abc9c', Protocol:'#9b59b6', Interface:'#3498db', Software:'#e91e63',
+  Standard:'#00bcd4', Error:'#f44336', Configuration:'#ff9800', Product:'#4caf50',
+  Version:'#795548', Vendor:'#607d8b', Other:'#95a5a6'
+};
+
+let _graphNetwork = null;
+
+async function loadGraphStats() {
+  const col = $('sel-graph-col').value;
+  if (!col) return;
+  try {
+    const stats = await api('GET', `/collections/${col}/graph/stats`);
+    $('graph-stats').textContent = `${stats.triple_count} triple${stats.triple_count !== 1 ? 's' : ''} stored`;
+  } catch(_) { $('graph-stats').textContent = ''; }
+}
+
+async function loadGraph() {
+  const col = $('sel-graph-col').value;
+  if (!col) { $('graph-status').textContent = 'Select a collection first.'; return; }
+  $('graph-status').textContent = 'Loading…';
+  const params = new URLSearchParams();
+  const srcDoc = $('filter-source-doc').value.trim();
+  const subjType = $('filter-subject-type').value;
+  const pred = $('filter-predicate').value;
+  if (srcDoc) params.set('source_doc', srcDoc);
+  if (subjType) params.set('subject_type', subjType);
+  if (pred) params.set('predicate', pred);
+  const qs = params.toString() ? '?' + params : '';
+  try {
+    const triples = await api('GET', `/collections/${col}/graph${qs}`);
+    $('graph-status').textContent = `Showing ${triples.length} triple${triples.length !== 1 ? 's' : ''}.`;
+    populateFilterSelects(triples);
+    renderTriplesTable(triples);
+    renderGraphNetwork(triples);
+    await loadGraphStats();
+  } catch(e) { $('graph-status').textContent = 'Error: ' + e.message; }
+}
+
+function populateFilterSelects(triples) {
+  const types = [...new Set(triples.flatMap(t => [t.subject?.type, t.object?.type]).filter(Boolean))].sort();
+  const preds = [...new Set(triples.map(t => t.predicate).filter(Boolean))].sort();
+  const typeEl = $('filter-subject-type'), curType = typeEl.value;
+  typeEl.innerHTML = '<option value="">All types</option>' + types.map(t => `<option${t===curType?' selected':''}>${escHtml(t)}</option>`).join('');
+  const predEl = $('filter-predicate'), curPred = predEl.value;
+  predEl.innerHTML = '<option value="">All predicates</option>' + preds.map(p => `<option${p===curPred?' selected':''}>${escHtml(p)}</option>`).join('');
+}
+
+function renderTriplesTable(triples) {
+  const tbody = $('tbl-triples').querySelector('tbody');
+  tbody.innerHTML = triples.map(t => `
+    <tr>
+      <td>${escHtml(t.subject?.name ?? '')} <span style="font-size:.72rem;color:#888">(${t.subject?.type ?? ''})</span></td>
+      <td><code style="font-size:.8rem;background:#f1f5f9;padding:1px 4px;border-radius:3px">${escHtml(t.predicate)}</code></td>
+      <td>${escHtml(t.object?.name ?? '')} <span style="font-size:.72rem;color:#888">(${t.object?.type ?? ''})</span></td>
+      <td style="text-align:right">${(t.weight ?? 0).toFixed(2)}</td>
+      <td style="font-size:.75rem;color:#888">${escHtml(t.source_doc)}</td>
+    </tr>`).join('');
+}
+
+function _darken(hex) {
+  const r = parseInt(hex.slice(1,3),16), g = parseInt(hex.slice(3,5),16), b = parseInt(hex.slice(5,7),16);
+  return '#' + [r,g,b].map(c => Math.max(0,c-40).toString(16).padStart(2,'0')).join('');
+}
+
+function renderGraphNetwork(triples) {
+  const container = $('graph-network');
+  const ph = $('graph-network-placeholder');
+  if (ph) ph.style.display = 'none';
+
+  if (triples.length === 0) {
+    if (_graphNetwork) { _graphNetwork.destroy(); _graphNetwork = null; }
+    container.innerHTML = '<p style="text-align:center;padding:60px;color:#aaa;font-size:.88rem">No triples found — run indexing with a graph engine method first.</p>';
+    $('graph-legend').innerHTML = '';
+    return;
+  }
+
+  const nodeMap = new Map();
+  const edges = [];
+  const usedTypes = new Set();
+
+  triples.forEach((t, i) => {
+    const sId = t.subject?.id ?? t.subject?.name ?? `s${i}`;
+    const oId = t.object?.id ?? t.object?.name ?? `o${i}`;
+    [{ id: sId, info: t.subject }, { id: oId, info: t.object }].forEach(({ id, info }) => {
+      if (!nodeMap.has(id)) {
+        const type = info?.type ?? 'Other';
+        usedTypes.add(type);
+        const bg = TYPE_COLORS[type] ?? TYPE_COLORS.Other;
+        nodeMap.set(id, {
+          id, label: info?.name ?? id, title: type,
+          color: { background: bg, border: _darken(bg), highlight: { background: bg, border: '#222' } },
+          font: { size: 12 }, borderWidth: 1.5, shape: 'ellipse'
+        });
+      }
+    });
+    edges.push({
+      id: `e${i}`, from: sId, to: oId, label: t.predicate,
+      arrows: 'to',
+      color: { color: '#bbb', highlight: '#888' },
+      font: { size: 10, color: '#555', align: 'middle' },
+      smooth: { type: 'continuous' }
+    });
+  });
+
+  if (_graphNetwork) { _graphNetwork.destroy(); _graphNetwork = null; }
+  container.innerHTML = '';
+
+  _graphNetwork = new vis.Network(
+    container,
+    { nodes: new vis.DataSet([...nodeMap.values()]), edges: new vis.DataSet(edges) },
+    {
+      physics: { solver: 'barnesHut', barnesHut: { gravitationalConstant: -8000, springLength: 130, centralGravity: 0.1 }, stabilization: { iterations: 200 } },
+      layout: { randomSeed: 42 },
+      interaction: { hover: true, tooltipDelay: 100 }
+    }
+  );
+
+  const legendEl = $('graph-legend');
+  legendEl.innerHTML = [...usedTypes].sort().map(type => {
+    const color = TYPE_COLORS[type] ?? TYPE_COLORS.Other;
+    return `<span class="graph-legend-item"><span class="graph-legend-dot" style="background:${color}"></span>${escHtml(type)}</span>`;
+  }).join('');
+}
+
+/* -----------------------------------------------------------------------
    Init
 ----------------------------------------------------------------------- */
 async function resumeActiveTasks() {
@@ -779,7 +1115,57 @@ async function resumeActiveTasks() {
   }
 }
 
-loadCollections().then(() => { loadDocuments(); resumeActiveTasks(); });
+loadCollections().then(() => { loadDocuments(); loadGraphStats(); resumeActiveTasks(); });
+
+/* -----------------------------------------------------------------------
+   Environment Config
+----------------------------------------------------------------------- */
+let _envLoaded = false;
+
+async function toggleEnvPanel() {
+  const body = $('env-panel-body');
+  const btn  = $('env-toggle-btn');
+  const open = body.style.display !== 'none';
+  if (open) {
+    body.style.display = 'none';
+    btn.textContent = 'Show';
+  } else {
+    body.style.display = '';
+    btn.textContent = 'Hide';
+    if (!_envLoaded) await loadEnvConfig();
+  }
+}
+
+async function loadEnvConfig() {
+  $('env-status').textContent = 'Loading…';
+  try {
+    const vars = await api('GET', '/api/env');
+    _envLoaded = true;
+    $('env-status').textContent = '';
+    const tbody = $('tbl-env').querySelector('tbody');
+    tbody.innerHTML = vars.map(v => {
+      let badge, displayVal;
+      if (!v.set && (v.default === null || v.default === '')) {
+        badge = '<span class="badge badge-env-missing">missing</span>';
+        displayVal = '<span style="color:#aaa;font-style:italic">not set</span>';
+      } else if (v.set) {
+        badge = '<span class="badge badge-env-set">set</span>';
+        displayVal = escHtml(v.value ?? '');
+      } else {
+        badge = '<span class="badge badge-env-default">default</span>';
+        displayVal = escHtml(v.default ?? '');
+      }
+      return `<tr>
+        <td>${escHtml(v.key)}</td>
+        <td>${displayVal}</td>
+        <td>${escHtml(v.description)}</td>
+        <td>${badge}</td>
+      </tr>`;
+    }).join('');
+  } catch(e) {
+    $('env-status').textContent = 'Error: ' + e.message;
+  }
+}
 
 /* -----------------------------------------------------------------------
    Send to Verification (Query tab)

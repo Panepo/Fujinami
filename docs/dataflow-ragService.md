@@ -11,13 +11,13 @@
 │  ┌─────────────┐   ┌──────────────┐   ┌─────────────────┐  │
 │  │  ./data/    │   │  RagService  │   │  LanceDB        │  │
 │  │  (raw docs) │──▶│  ragService  │──▶│  ./ragdata/     │  │
-│  │  .txt .md   │   │  .py         │   │  lancedb/       │  │
-│  │  .pdf .docx │   └──────┬───────┘   │  (persistent)   │  │
-│  │  .doc       │          │           └─────────────────┘  │
-│  └─────────────┘          │           ┌─────────────────┐  │
-│                            │           │  ./ragdata/     │  │
-│                            │──────────▶│  GraphRAG index │  │
-│                            │           │  (KG artifacts) │  │
+│  │  .pdf .docx │   │  .py         │   │  lancedb/       │  │
+│  │  .xlsx .pptx│   └──────┬───────┘   │  (persistent)   │  │
+│  │  .md .html  │          │           └─────────────────┘  │
+│  │  .png .jpg  │          │           ┌─────────────────┐  │
+│  │  .wav .mp3  │          │           │  ./ragdata/     │  │
+│  │  .mp4 …     │          │──────────▶│  GraphRAG index │  │
+│  └─────────────┘          │           │  (KG artifacts) │  │
 │                            │           └─────────────────┘  │
 └────────────────────────────┼────────────────────────────────┘
                              │ HTTP (OpenAI-compatible API)
@@ -52,24 +52,28 @@ User calls: await rag.index_documents("./documents")
                 ▼
 ┌──────────────────────────────────────────────────────────────┐
 │  STEP 1 — File Discovery                                     │
-│  Walk documents_dir                                          │
-│  Filter: .txt  .md  .pdf  .docx  .doc                        │
+│  Walk documents_dir recursively                              │
+│  Filter: SUPPORTED_EXTENSIONS (~30 types)                    │
+│  docs: .pdf .docx .xlsx .pptx .md .tex .html .csv …         │
+│  imgs: .png .jpg .jpeg .tiff .bmp .webp                      │
+│  audio: .wav .mp3 .m4a .aac .ogg .flac                       │
+│  video: .mp4 .avi .mov                                       │
 └────────────────────┬─────────────────────────────────────────┘
                      │ file paths
                      ▼
 ┌──────────────────────────────────────────────────────────────┐
 │  STEP 2 — DocumentLoader.load(file_path) → str               │
-│  (per file, dispatched by extension)                         │
+│  Single path for all formats (see §2.2)                      │
 │                                                              │
-│  .txt / .md  ──▶  read as-is                                 │
-│  .pdf        ──▶  _load_pdf()   (see §2.2)                   │
-│  .docx       ──▶  _load_docx()  (see §2.3)                   │
-│  .doc        ──▶  _load_doc()   (see §2.4)                   │
+│  any format ──▶  Docling DocumentConverter.convert(path)     │
+│                      ├─ OCR, table extraction                │
+│                      ├─ VLM picture description (llava:7b)   │
+│                      └─ export_to_markdown()                  │
 └────────────────────┬─────────────────────────────────────────┘
-                     │ plain text (with [IMAGE/DIAGRAM] blocks)
+                     │ markdown text (tables, headings, picture descriptions)
                      ▼
 ┌──────────────────────────────────────────────────────────────┐
-│  STEP 3 — Write enriched .txt files to ./data/               │
+│  STEP 3 — Write markdown files to ./data/                    │
 │  (GraphRAG input directory)                                  │
 └────────────────────┬─────────────────────────────────────────┘
                      │
@@ -93,139 +97,49 @@ User calls: await rag.index_documents("./documents")
 └─────────────────┘
 ```
 
-Both Step 4a and 4b run against the same enriched text, enabling dual retrieval at query time.
+Both Step 4a and 4b run against the same markdown text, enabling dual retrieval at query time.
 
 ---
 
-### 2.2 PDF Load Flow (`_load_pdf`)
+### 2.2 Docling Load Flow (`DocumentLoader.load`)
+
+All input formats share a single code path through Docling's `DocumentConverter`.
 
 ```
-PDF file
+any supported file
    │
-   ├──▶ pypdf.PdfReader
-   │        │
-   │        └── page.extract_text()  ──▶  page_text (str)
+   ▼
+DocumentConverter.convert(str(path))
    │
-   └──▶ pymupdf (fitz.open)
-            │
-            └── page.get_images(full=True)
-                    │ per image block (xref, bbox, position)
-                    ▼
-            image_bytes  +  surrounding_text
-                    │
-                    ▼
-            _describe_image(image_bytes, surrounding_text)
-                    │
-                    ▼
-            "[IMAGE DESCRIPTION: ...]"
-            or "[DIAGRAM: Node A → ... ]"
-                    │
-                    ▼
-   splice at image's bbox position within page_text
-            │
-            ▼
-   full enriched page text
-```
-
----
-
-### 2.3 DOCX Load Flow (`_load_docx`)
-
-```
-.docx file
+   ├─ Format detection (by extension + magic bytes)
    │
-   └──▶ python-docx Document
-            │
-            ├── paragraph.runs  ──▶  text collected in order
-            │
-            └── paragraph.InlineShapes
-                    │ per shape
-                    ▼
-            shape.image.blob  (image_bytes)
-            +  paragraph.text  (surrounding_text)
-                    │
-                    ▼
-            _describe_image(image_bytes, surrounding_text)
-                    │
-                    ▼
-            "[IMAGE DESCRIPTION: ...]"
-            or "[DIAGRAM: ...]"
-                    │
-                    ▼
-   injected at paragraph position in assembled text
-```
-
----
-
-### 2.4 Legacy DOC Load Flow (`_load_doc`)
-
-```
-.doc file  (Windows only)
+   ├─ Layout model  (LayoutModel / EasyOCR)
+   │      Segments pages into: text blocks, tables, figures
    │
-   └──▶ win32com.client.Dispatch("Word.Application")
-            │
-            └── Document.SaveAs(tmp_path, FileFormat=wdFormatDocx)
-                    │
-                    ▼
-            tmp .docx file
-                    │
-                    ▼
-            _load_docx()  (delegates, then returns text)
-```
-
-Non-Windows: raises `NotImplementedError` → caller logs warning, skips file.
-
----
-
-### 2.5 Image Description Sub-Flow (`_describe_image`)
-
-```
-image_bytes  +  surrounding_text
-       │
-       ▼
-_detect_diagram_type(image_bytes)
-       │
-       │  One VLM call:
-       │  POST /api/chat  (llava:7b / minicpm-v)
-       │  Prompt: "Is this a photo, chart, flowchart, UML
-       │           diagram, table, or other diagram?
-       │           Reply with one word."
-       │
-       ▼
-  type_tag: photo | chart | flowchart | uml | table | diagram
-       │
-       ▼
-_build_vlm_prompt(type_tag, surrounding_text)
-       │
-       │  Template selection:
-       │  flowchart/uml  → "List every node and every labeled
-       │                    edge as: Node A → [label] → Node B"
-       │  chart          → "Describe chart type, axes, series,
-       │                    and key values"
-       │  table          → "Extract the table as pipe-delimited
-       │                    rows"
-       │  photo/other    → generic description prompt
-       │
-       │  surrounding_text injected as grounding context
-       │
-       ▼
-  prompt_str
-       │
-       ▼
-POST http://10.168.3.58:8088/api/chat  (OLLAMA_INDEX_URL)
-  body: { model: "llava:7b",
-          messages: [{ role: "user",
-                       content: [
-                         { type: "image_url",
-                           image_url: { url: "data:image/...;base64,<b64>" }},
-                         { type: "text", text: prompt_str }
-                       ]}]}
-       │
-       ├── success ──▶ wrap result:
-       │               "[DIAGRAM: ...]"  (flowchart/uml)
-       │               "[IMAGE DESCRIPTION: ...]"  (others)
-       │
-       └── failure ──▶ log warning, return ""  (indexing continues)
+   ├─ Table structure model
+   │      Reconstructs rows/columns → rendered as Markdown table
+   │
+   ├─ Picture description pipeline  (PDF + image inputs)
+   │      PdfPipelineOptions:
+   │        do_picture_description = True
+   │        enable_remote_services  = True
+   │      PictureDescriptionApiOptions:
+   │        url     = "{OLLAMA_INDEX_URL}/v1/chat/completions"
+   │        timeout = VLM_TIMEOUT
+   │        params  = {"model": "llava:7b"}
+   │        prompt  = "Describe this image in detail ..."
+   │      └─ POST /v1/chat/completions  →  description text
+   │           on failure: Docling logs warning, uses placeholder
+   │
+   ├─ ASR pipeline  (audio/video inputs; requires docling[asr] + ffmpeg)
+   │      Transcribes audio → plain text
+   │
+   └─ result.document.export_to_markdown()
+          Merges all blocks (text, tables, picture captions)
+          into a single Markdown string
+   │
+   ▼
+  markdown str  (returned to RagService for indexing)
 ```
 
 ---
@@ -361,8 +275,7 @@ OllamaChatCompletionService  (llama3.2:3b)
 
 | Call | Triggered by | Server | Endpoint | Model |
 | :--- | :--- | :--- | :--- | :--- |
-| Diagram type detection | `_detect_diagram_type()` | `OLLAMA_INDEX_URL` | `POST /api/chat` | `llava:7b` |
-| Image description | `_describe_image()` | `OLLAMA_INDEX_URL` | `POST /api/chat` | `llava:7b` |
+| VLM picture description | Docling `_build_converter()` (via `PictureDescriptionApiOptions`) | `OLLAMA_INDEX_URL` | `POST /v1/chat/completions` | `llava:7b` |
 | GraphRAG index completion (entity extraction, summarisation) | `graphrag index` CLI | `OLLAMA_CHAT_URL` | `/v1/chat/completions` | `llama3.2:3b` |
 | GraphRAG index embedding (`indexing_embedding_model`) | `graphrag index` CLI | `OLLAMA_INDEX_URL` | `/v1/embeddings` | `bge-m3:567m` |
 | SK chunk embedding | `index_documents()` | `OLLAMA_INDEX_URL` | `/v1/embeddings` | `bge-m3:567m` |
@@ -379,23 +292,23 @@ OllamaChatCompletionService  (llama3.2:3b)
 ## 6. File Lifecycle
 
 ```
-SOURCE FILE                 INTERMEDIATE                OUTPUT / INDEX
-───────────────             ────────────────────        ──────────────────────────
-./documents/foo.pdf  ──▶   ./data/foo.txt         ──▶  ragdata/output/entities
-./documents/bar.docx ──▶   ./data/bar.txt         ──▶  ragdata/output/communities
-./documents/baz.md   ──▶   ./data/baz.md (copy)   ──▶  ragdata/output/covariates
-                                                        ragdata/output/reports
-                                │
-                                └──▶ SK chunker + embed
+SOURCE FILE                    INTERMEDIATE                   OUTPUT / INDEX
+──────────────────             ──────────────────────         ──────────────────────────
+./documents/foo.pdf   ──▶    ./data/foo.md            ──▶   ragdata/output/entities
+./documents/bar.xlsx  ──▶    ./data/bar.md            ──▶   ragdata/output/communities
+./documents/img.png   ──▶    ./data/img.md            ──▶   ragdata/output/covariates
+./documents/audio.mp3 ──▶    ./data/audio.md          ──▶   ragdata/output/reports
                                         │
-                                        ▼
+                                        └──▶ SK chunker + embed
+                                                │
+                                                ▼
                                 LanceDB  ./ragdata/lancedb/
                                 table: "documents"
                                 (persisted on disk;
                                  survives process restart)
 ```
 
-Image-bearing pages produce enriched `.txt` where raw image bytes are replaced by inline `[DIAGRAM: ...]` or `[IMAGE DESCRIPTION: ...]` text blocks before being written to `./data/`.
+Docling converts every input format to Markdown before writing to `./data/`. Tables are rendered as pipe-delimited Markdown, and embedded images/pictures are replaced by Docling-generated description text inline in the document.
 
 ---
 
@@ -403,8 +316,9 @@ Image-bearing pages produce enriched `.txt` where raw image bytes are replaced b
 
 | Condition | Handler | Effect on pipeline |
 | :--- | :--- | :--- |
-| VLM call times out or fails | `_describe_image()` logs warning, returns `""` | Image position left blank; indexing continues |
-| `.doc` on non-Windows | `_load_doc()` raises `NotImplementedError` | `load_directory()` logs warning, skips file |
-| Unsupported file extension | `DocumentLoader.load()` returns `""` | File excluded from `./data/`; not indexed |
+| VLM picture description fails or times out | Docling logs warning, inserts placeholder text | Indexing continues with partial content |
+| Docling layout/OCR models not cached | Auto-downloaded on first `DocumentConverter()` call (~1 GB) | One-time cold start; bake into Docker with `RUN python -c "from docling.document_converter import DocumentConverter; DocumentConverter()"` |
+| Audio/video on system without ffmpeg | Docling raises `ConversionError` | `load_directory()` logs warning, skips file |
+| Unsupported file extension | `DocumentLoader.load()` raises `ValueError` | File excluded from `./data/`; not indexed |
 | `graphrag index` subprocess fails | `RagService.index_documents()` raises `RuntimeError` | Indexing halted; LanceDB table may be partially populated |
 | Ollama server unreachable | Ollama connector raises connection error | Propagates to caller |
