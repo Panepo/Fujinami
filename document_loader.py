@@ -796,9 +796,9 @@ class DocumentLoader:
             return bool(getattr(item, "enumerated", False) or getattr(item, "ordered", False))
         return None
 
-    def _table_to_text(self, table_item: Any) -> str:
+    def _table_to_text(self, table_item: Any, doc: Any = None) -> str:
         try:
-            md = table_item.export_to_markdown()
+            md = table_item.export_to_markdown(doc=doc)
             if md:
                 return md
         except Exception:
@@ -875,7 +875,7 @@ class DocumentLoader:
                                              ordered=self._is_ordered(item)))
 
                 elif lbl in TABLE_LABELS:
-                    ttext = self._table_to_text(item)
+                    ttext = self._table_to_text(item, doc=doc)
                     if ttext.strip():
                         elements.append(_add("table", ttext, page))
 
@@ -941,7 +941,7 @@ class DocumentLoader:
                         text = f"{marker.strip()} {text}"
                     elements.append(_add("list_item", text, page, ordered=self._is_ordered(item)))
             elif lbl in TABLE_LABELS:
-                ttext = self._table_to_text(item)
+                ttext = self._table_to_text(item, doc=doc)
                 if ttext.strip():
                     elements.append(_add("table", ttext, page))
 
@@ -1464,7 +1464,7 @@ class DocumentLoader:
 
         pdf_opts = PdfPipelineOptions()
         pdf_opts.do_picture_description = False
-        pdf_opts.images_scale = 2.0
+        pdf_opts.images_scale = 1.0
         pdf_opts.generate_picture_images = True
 
         return DocumentConverter(

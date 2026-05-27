@@ -304,6 +304,35 @@ async def download_document(name: str, filename: str) -> FileResponse:
     return FileResponse(path=target, filename=filename, media_type="application/octet-stream")
 
 
+@app.get("/collections/{name}/documents/{filename}/embedded")
+async def download_embedded(name: str, filename: str) -> FileResponse:
+    """Return the per-document ``embedded.json`` as a file download.
+
+    The file is written by the indexer after a document is embedded.
+    Returns ``404`` if the document has not yet been indexed.
+    """
+    _get_service(name)
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    doc_stem = Path(filename).stem
+    embedded_dir = (_ROOT_DIR / "ragdata" / name / "embedded").resolve()
+    target = (embedded_dir / f"{doc_stem}.embedded.json").resolve()
+    # Guard against path traversal
+    if not str(target).startswith(str(embedded_dir)):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    if not target.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Embedded JSON for '{filename}' not found (document not yet indexed)",
+        )
+    return FileResponse(
+        path=target,
+        filename=f"{doc_stem}.embedded.json",
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{doc_stem}.embedded.json"'},
+    )
+
+
 @app.delete("/collections/{name}/documents/{filename}", status_code=204)
 async def delete_document(name: str, filename: str) -> None:
     _get_service(name)
