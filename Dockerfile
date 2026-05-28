@@ -25,7 +25,7 @@ RUN PYTHONPATH=/install/lib/python3.12/site-packages \
 
 # Pre-bake Docling layout/OCR models (~1 GB) to avoid cold-start at runtime
 RUN PYTHONPATH=/install/lib/python3.12/site-packages \
-    python -c "from docling.pipeline.standard_pdf_pipeline import StandardPdfPipeline; StandardPdfPipeline.download_models_hf(force=True)"
+    python -c "from docling.utils.model_downloader import download_models; download_models(force=True)"
 
 # ---------------------------------------------------------------------------
 # Runtime stage
@@ -42,7 +42,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy installed packages + pre-baked Docling models + spaCy model from builder
 COPY --from=builder /install /usr/local
-COPY --from=builder /root/.cache/huggingface /root/.cache/huggingface
+COPY --from=builder /root/.cache/docling /root/.cache/docling
 
 # Copy application source
 COPY api.py models.py ragService.py retriever.py document_loader.py ragas_runner.py __init__.py ./
@@ -56,6 +56,7 @@ VOLUME ["/app/data", "/app/ragdata"]
 # Environment variable defaults (override at runtime via --env or compose env_file)
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
+    DOCLING_ARTIFACTS_PATH=/root/.cache/docling/models \
     OLLAMA_INDEX_URL=http://host.docker.internal:11434 \
     OLLAMA_CHAT_URL=http://host.docker.internal:11434 \
     CHAT_MODEL=gemma4:e2b \
