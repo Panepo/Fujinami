@@ -10,5 +10,6 @@ openai
 spacy
 langdetect
 openpyxl
+langchain-community<0.3.0
 langchain-text-splitters
 python-pptx
