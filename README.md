@@ -1,16 +1,18 @@
 # Fujinami RAG Service
 
-A hybrid **Retrieval-Augmented Generation (RAG)** system that combines [Microsoft GraphRAG](https://github.com/microsoft/graphrag), [Semantic Kernel](https://github.com/microsoft/semantic-kernel), and [LanceDB](https://lancedb.github.io/lancedb/) to answer questions over your document collections using locally-hosted [Ollama](https://ollama.com/) models.
+A hybrid **Retrieval-Augmented Generation (RAG)** system that combines a local knowledge-graph engine, [Semantic Kernel](https://github.com/microsoft/semantic-kernel), and [LanceDB](https://lancedb.github.io/lancedb/) to answer questions over your document collections using locally-hosted [Ollama](https://ollama.com/) models.
 
 ---
 
 ## Features
 
-- **Hybrid search** — blends dense vector search (LanceDB) with graph-based retrieval (GraphRAG knowledge graph) for richer answers
-- **Three query modes** — `vector`, `hybrid`, and `global` (community-level summaries)
+- **Hybrid search** — blends dense vector search (LanceDB) with local knowledge-graph retrieval (`graph_engine`) for richer answers
+- **Three query modes** — `vector`, `hybrid`, and `graph` (entity/relationship context)
 - **Multi-collection** — manage independent document collections via a REST API
 - **Rich document ingestion** — powered by [Docling](https://github.com/DS4SD/docling); supports documents (`.pdf`, `.docx`, `.xlsx`, `.pptx`, `.md`, `.tex`, `.html`, `.csv`, and more), images (`.png`, `.jpg`, `.jpeg`, `.tiff`, `.bmp`, `.webp`), audio (`.wav`, `.mp3`, `.m4a`, `.aac`, `.ogg`, `.flac`), and video (`.mp4`, `.avi`, `.mov`); embedded pictures are described inline by a VLM via Docling's built-in picture-description pipeline
-- **Streaming responses** — optional token-by-token streaming on query endpoints
+- **Incremental indexing** — SHA-256 content-hash delta detection; only new or modified files are reprocessed
+- **Streaming responses** — optional SSE token-by-token streaming on query endpoints
+- **Knowledge graph browser** — REST endpoints to inspect and filter extracted triples
 - **Built-in Web UI** — zero-configuration browser interface served at `/`
 - **Fully local** — all LLM, embedding, and VLM calls go to Ollama; no cloud APIs required
 - **RAGAS evaluation** — score RAG responses against 10 built-in metrics (Faithfulness, Context Recall, Context Precision, Response Relevancy, Factual Correctness, Noise Sensitivity, Semantic Similarity, BLEU, ROUGE) using a locally-hosted LLM
@@ -28,29 +30,30 @@ Video    (.mp4 .avi .mov …)
         ▼
   DocumentLoader  ──▶  Docling DocumentConverter
     (docling[asr])         ├─ OCR + table extraction
-                           ├─ VLM picture description (llava:7b)
-                           └─ export_to_markdown()
+                           ├─ VLM picture description
+                           └─ chunked output with metadata
         │
+        ├──────────────────────────┐
+        ▼                          ▼
+  OllamaEmbedder             GraphPipeline
+  (index-time)               (graph_engine/)
+  POST /api/embed             spacy | llm | hybrid extractor
+  L2-normalised float32       ── triples ──▶ LanceDB
+        │                              graph_triples table
         ▼
-  ┌─────────────────────────────────┐
-  │         Index Pipeline          │
-  │                                 │
-  │  GraphRAG CLI  ──▶  entities,   │
-  │  (subprocess)       communities │
-  │                     reports     │
-  │                                 │
-  │  SK Embeddings ──▶  LanceDB     │
-  │  (bge-m3:567m)      chunks      │
-  └─────────────────────────────────┘
+  LanceDB "documents" table  (per-doc embedded.json cache)
         │
         ▼
   FastAPI server  ──▶  Web UI  /  REST API
         │
         ▼
-  Query (vector | hybrid | global)
+  Query (vector | hybrid | graph)
+  ├─ vector: LanceDB ANN search
+  ├─ graph:  spaCy NER → LanceDB triple lookup
+  └─ hybrid: both merged
         │
         ▼
-  llama3.2:3b  →  answer + source chunks
+  CHAT_MODEL  →  answer + source chunks
 ```
 
 See [docs/dataflow-ragService.md](docs/dataflow-ragService.md) for full pipeline diagrams.
@@ -67,16 +70,18 @@ See [docs/dataflow-ragService.md](docs/dataflow-ragService.md) for full pipeline
 
 ### Required Ollama models
 
-Pull these before first use:
+The exact model names are configured via `.env` variables (`CHAT_MODEL`, `EMBEDDING_MODEL`, `VLM_MODEL`, `EXTRACT_MODEL`). Pull whichever models you configure before first use:
 
 ```sh
-# Chat and query-time (local)
+# Chat and query-time (local, set as CHAT_MODEL / EMBEDDING_MODEL)
 ollama pull llama3.2:3b
 ollama pull bge-m3:567m
 
-# Index-time embeddings and VLM for picture description (can be on a remote GPU server)
-ollama pull bge-m3:567m
-ollama pull llava:7b   # used by Docling's picture-description pipeline
+# Index-time VLM for picture description (can be on a remote GPU server, set as VLM_MODEL)
+ollama pull llava:7b
+
+# LLM for graph triple extraction (set as EXTRACT_MODEL; can be the same as CHAT_MODEL)
+ollama pull llama3.2:3b
 ```
 
 ---
@@ -86,7 +91,7 @@ ollama pull llava:7b   # used by Docling's picture-description pipeline
 ### 1. Create a `.env` file
 
 ```env
-# Remote Ollama server used during indexing (embeddings + VLM)
+# Remote Ollama server used during indexing (embeddings + VLM + graph extraction)
 OLLAMA_INDEX_URL=
 
 # Local Ollama server used at query time
@@ -96,9 +101,18 @@ OLLAMA_CHAT_URL=
 CHAT_MODEL=llama3.2:3b
 EMBEDDING_MODEL=bge-m3:567m
 VLM_MODEL=llava:7b
+EXTRACT_MODEL=llama3.2:3b     # LLM used for graph triple extraction
+
+# Knowledge-graph extraction
+GRAPH_EXTRACTOR=hybrid         # spacy | llm | hybrid (default)
+GRAPH_CHUNK_SIZE=400
+GRAPH_CHUNK_OVERLAP=80
 
 # Optional: VLM HTTP timeout in seconds (default 180)
 VLM_TIMEOUT=180
+
+# Optional: number of vector search results to return (default 5)
+TOP_K=5
 
 # Model used for RAGAS evaluation (needs large context window, e.g. gemma4:e4b)
 RAGAS_MODEL=gemma4:e4b
@@ -158,19 +172,26 @@ DELETE /collections/{name}             # delete collection and all its data
 #### Documents
 
 ```http
-GET    /collections/{name}/documents              # list uploaded documents
-POST   /collections/{name}/documents              # upload a file (multipart/form-data)
-DELETE /collections/{name}/documents/{filename}   # delete a document
+GET    /collections/{name}/documents                           # list uploaded documents
+POST   /collections/{name}/documents                           # upload a file (multipart/form-data)
+DELETE /collections/{name}/documents/{filename}                # delete a document
+GET    /collections/{name}/documents/{filename}/download       # download original file
+GET    /collections/{name}/documents/{filename}/embedded       # download per-doc embedded.json
+GET    /collections/{name}/documents/{filename}/chunks         # list all LanceDB chunks
 ```
 
 #### Indexing
 
 ```http
-POST /collections/{name}/index          # trigger indexing (async, returns task_id)
-                                        # body (optional): { "entity_types": ["person", "org"] }
+POST /collections/{name}/index           # trigger indexing (async, returns task_id)
+                                         # body (optional):
+                                         # { "mode": "all", "force": false,
+                                         #   "entity_types": ["person", "org"] }
 GET  /collections/{name}/index/{task_id} # poll indexing status
-GET  /tasks                              # list all pending/running tasks
 ```
+
+`mode` values: `all` (default) · `vector` (LanceDB only) · `graph` (triple extraction only)
+`force: true` ignores the file manifest and reprocesses all files.
 
 #### Querying
 
@@ -189,11 +210,19 @@ POST /collections/{name}/query
 
 | Field | Values | Default |
 |---|---|---|
-| `method` | `vector` \| `hybrid` \| `global` | `hybrid` |
+| `method` | `vector` \| `hybrid` \| `graph` | `hybrid` |
 | `top_k` | integer | `5` |
 | `stream` | `true` \| `false` | `false` |
 
-Response includes `answer`, `sources` (chunk excerpts with doc references), and `graphrag_context`.
+Response includes `answer`, `sources` (chunk excerpts with doc references), and `graphrag_context` (graph triples used).
+
+#### Knowledge Graph
+
+```http
+GET /collections/{name}/graph/stats   # triple count in the graph store
+GET /collections/{name}/graph         # browse triples
+                                      # optional query params: source_doc, subject_type, predicate
+```
 
 #### RAGAS Evaluation
 
@@ -243,18 +272,38 @@ Upload a `.json` (array of sample objects) or `.csv` file via `multipart/form-da
 ```
 Fujinami/
 ├── .env                        # environment variables (create this)
-├── python/
-│   ├── api.py                  # FastAPI application and all HTTP endpoints
-│   ├── ragService.py           # RagService: indexing + search logic
-│   ├── document_loader.py      # Docling-based loader; converts all supported formats to markdown
-│   ├── ragas_runner.py         # RAGAS metric registry and async evaluation runner
-│   ├── models.py               # Pydantic request/response schemas
-│   ├── install_dependency.py   # Dependency installer script
-│   ├── pyproject.toml          # Project metadata and poe tasks
-│   ├── static/
-│   │   └── index.html          # Single-page Web UI
-│   ├── data/                   # Uploaded source documents (per collection)
-│   └── ragdata/                # GraphRAG artifacts + LanceDB vector store (per collection)
+├── api.py                      # FastAPI application and all HTTP endpoints
+├── ragService.py               # RagService: thin facade over RagIndexer + RagRetriever
+├── retriever.py                # RagRetriever: vector search, graph context, response generation
+├── document_loader.py          # Docling-based loader; converts all formats to chunked output
+├── ragas_runner.py             # RAGAS metric registry and async evaluation runner
+├── models.py                   # Pydantic request/response schemas
+├── pyproject.toml              # Project metadata and poe tasks
+├── indexer/                    # RagIndexer package
+│   ├── pipeline.py             #   orchestration: delta detection → load → embed → upsert
+│   ├── delta.py                #   SHA-256 manifest helpers
+│   ├── embedder.py             #   OllamaEmbedder (direct /api/embed, L2-normalised)
+│   ├── graph.py                #   run_graph_extraction / remove_graph_triples
+│   └── store.py                #   LanceDB open/upsert/remove helpers
+├── graph_engine/               # Local knowledge-graph extraction package
+│   ├── pipeline.py             #   GraphPipeline: chunk → extract → deduplicate → store
+│   ├── store.py                #   LanceDBGraphStore (graph_triples table)
+│   ├── models.py               #   Triple, Node, Edge dataclasses
+│   ├── chunker.py              #   Overlapping text chunker
+│   ├── deduplicator.py         #   Triple deduplication by triple_id
+│   └── extractors/
+│       ├── spacy_extractor.py  #   spaCy NER co-occurrence extractor
+│       ├── llm_extractor.py    #   LLM-based structured triple extraction
+│       └── hybrid_extractor.py #   SpacyExtractor + LLMExtractor merged
+├── static/
+│   └── index.html              # Single-page Web UI
+├── data/                       # Uploaded source documents (per collection subfolder)
+├── ragdata/                    # LanceDB vector + graph store (per collection subfolder)
+│   └── {collection}/
+│       ├── lancedb/            #   LanceDB DB (documents + graph_triples tables)
+│       │   └── file_manifest.json
+│       ├── embedded/           #   Per-document embedded.json cache
+│       └── index_flags.json    #   {vector_indexed, graph_indexed}
 └── docs/
     └── dataflow-ragService.md  # Detailed pipeline and data-flow documentation
 ```
@@ -266,20 +315,26 @@ Fujinami/
 | Mode | How it works | Best for |
 |---|---|---|
 | `vector` | Dense cosine similarity over LanceDB chunk embeddings | Precise factual lookups |
-| `hybrid` | Vector search + GraphRAG local search combined | General question answering |
-| `global` | GraphRAG community-level summary search | Broad thematic / cross-document questions |
+| `hybrid` | Vector search + local graph triple lookup, merged context | General question answering |
+| `graph` | spaCy NER entity extraction → `graph_triples` triple lookup | Entity/relationship questions |
 
 ---
 
-## Entity Types
+## Graph Extraction
 
-When triggering indexing you can pass a list of entity types to tune the GraphRAG knowledge graph extraction:
+When triggering indexing you can control the extractor via the `GRAPH_EXTRACTOR` env variable (or override per-collection in future):
+
+| Extractor | Description |
+|---|---|
+| `spacy` | spaCy NER co-occurrence: named entities become nodes; edges from sentence co-occurrence |
+| `llm` | LLM-structured extraction: sends chunks to `EXTRACT_MODEL` and parses JSON triples |
+| `hybrid` | Runs both `spacy` and `llm`, merges and deduplicates results (default) |
+
+You can also pass `entity_types` in the index request body to hint the LLM extractor:
 
 ```
 organization  person  geo  event  concept  technology  product  process  system
 ```
-
-Omitting `entity_types` uses the GraphRAG defaults.
 
 ---
 
@@ -287,8 +342,11 @@ Omitting `entity_types` uses the GraphRAG defaults.
 
 | Condition | Behaviour |
 |---|---|
-| Docling models not downloaded | First call to `DocumentConverter` triggers automatic download (~1 GB layout/OCR models); bake into Docker image with `RUN python -c "from docling.document_converter import DocumentConverter; DocumentConverter()"`  |
+| Docling models not downloaded | First call to `DocumentConverter` triggers automatic download (~1 GB layout/OCR models); bake into Docker image with `RUN python -c "from docling.document_converter import DocumentConverter; DocumentConverter()"` |
 | VLM picture description fails or times out | Warning logged by Docling; image rendered as placeholder; indexing continues |
 | Unsupported file extension | File rejected at upload with HTTP 422 |
-| `graphrag index` subprocess fails | Indexing task transitions to `error`; detail message returned |
-| Ollama server unreachable | HTTP 500 propagated to API caller |
+| File fails to load (Docling error) | Warning logged; file excluded from manifest and retried on next index call |
+| No changes detected (delta) | `index_documents` returns immediately without calling Ollama |
+| `graph_engine` import fails | Graph extraction step skipped with a warning; vector indexing proceeds normally |
+| Ollama server unreachable | HTTP 500 propagated to API caller; index task transitions to `"error"` |
+| Query on collection with unindexed files | HTTP 409 returned; client must re-index before querying |
