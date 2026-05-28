@@ -1,5 +1,4 @@
 --pre
-agent-framework
 semantic-kernel[ollama]
 lancedb
 pyarrow
@@ -10,6 +9,5 @@ openai
 spacy
 langdetect
 openpyxl
-langchain-community<0.3.0
 langchain-text-splitters
 python-pptx
