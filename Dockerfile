@@ -56,14 +56,17 @@ VOLUME ["/app/data", "/app/ragdata"]
 # Environment variable defaults (override at runtime via --env or compose env_file)
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    CHAT_MODEL=llama3.2:3b \
-    EMBEDDING_MODEL=bge-m3:567m \
-    VLM_MODEL=llava:7b \
+    OLLAMA_INDEX_URL=http://host.docker.internal:11434 \
+    OLLAMA_CHAT_URL=http://host.docker.internal:11434 \
+    CHAT_MODEL=gemma4:e2b \
+    EMBEDDING_MODEL=embeddinggemma:300m \
+    VLM_MODEL=gemma4:e4b \
     VLM_TIMEOUT=180 \
-    EXTRACT_MODEL=llama3.2:3b \
+    EXTRACT_MODEL=granite4.1:8b \
     GRAPH_EXTRACTOR=hybrid \
     GRAPH_CHUNK_SIZE=400 \
     GRAPH_CHUNK_OVERLAP=80 \
+    RAGAS_MODE=gemma4:31b \
     TOP_K=5
 
 EXPOSE 8000
