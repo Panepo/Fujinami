@@ -120,6 +120,19 @@ class RagRetriever:
             return True
         return False
 
+    def reload_table(self) -> None:
+        """Reopen the LanceDB table reference so newly indexed rows are visible.
+
+        Call this after :meth:`RagIndexer.index_documents` completes to ensure
+        subsequent searches see the latest data without a server restart.
+        """
+        if _TABLE_NAME in self._db.table_names():
+            self._table = self._db.open_table(_TABLE_NAME)
+            logger.info("Reloaded LanceDB table '%s'", _TABLE_NAME)
+        else:
+            self._table = None
+            logger.info("LanceDB table '%s' not yet created", _TABLE_NAME)
+
     # ------------------------------------------------------------------
     # Public search API
     # ------------------------------------------------------------------

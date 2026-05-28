@@ -525,6 +525,15 @@ async def _stream_answer_inner(
 async def query_collection(name: str, body: QueryRequest):
     rag = _get_service(name)
 
+    if _index_status(name) == "new_docs":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Collection has unindexed documents. "
+                "Please re-index the collection before querying."
+            ),
+        )
+
     sources: list[SourceChunk] | None = None
     vector_context: str | None = None
     graphrag_context: str | None = None

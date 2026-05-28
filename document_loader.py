@@ -1463,8 +1463,7 @@ class DocumentLoader:
         )
 
         pdf_opts = PdfPipelineOptions()
-        pdf_opts.do_picture_description = False
-        pdf_opts.images_scale = 1.0
+        pdf_opts.do_ocr = False
         pdf_opts.generate_picture_images = True
 
         return DocumentConverter(

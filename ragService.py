@@ -78,6 +78,9 @@ class RagService:
             mode=mode,
             force=force,
         )
+        # Reopen the retriever's LanceDB table reference so newly indexed
+        # chunks are immediately visible to subsequent queries.
+        self._retriever.reload_table()
 
     # ------------------------------------------------------------------
     # Search (delegated to RagRetriever)

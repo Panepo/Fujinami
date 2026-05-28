@@ -494,9 +494,10 @@ async function loadCollections() {
   updateQueryMethodAvailability();
 }
 
-function indexStatusBadge(vectorIndexed, graphIndexed) {
+function indexStatusBadge(vectorIndexed, graphIndexed, indexStatus) {
   let status, label;
-  if (vectorIndexed && graphIndexed)       { status = 'indexed';      label = 'Indexed'; }
+  if (indexStatus === 'new_docs')          { status = 'new_docs';     label = 'New Docs'; }
+  else if (vectorIndexed && graphIndexed)  { status = 'indexed';      label = 'Indexed'; }
   else if (vectorIndexed && !graphIndexed) { status = 'vector_only';  label = 'Vector Only'; }
   else if (!vectorIndexed && graphIndexed) { status = 'graph_only';   label = 'Graph Only'; }
   else                                     { status = 'not_indexed';  label = 'Not Indexed'; }
@@ -507,14 +508,14 @@ function renderCollectionsTable(cols) {
   // Refresh per-collection index flags for the query tab
   _collectionFlags = {};
   cols.forEach(c => {
-    _collectionFlags[c.name] = { vector_indexed: c.vector_indexed ?? false, graph_indexed: c.graph_indexed ?? false };
+    _collectionFlags[c.name] = { vector_indexed: c.vector_indexed ?? false, graph_indexed: c.graph_indexed ?? false, index_status: c.index_status ?? 'not_indexed' };
   });
   const tbody = $('tbl-collections').querySelector('tbody');
   tbody.innerHTML = cols.map(c => `
     <tr>
       <td>${c.name}</td>
       <td>${c.doc_count}</td>
-      <td>${indexStatusBadge(c.vector_indexed, c.graph_indexed)}</td>
+      <td>${indexStatusBadge(c.vector_indexed, c.graph_indexed, c.index_status)}</td>
       <td style="white-space:nowrap">
         <button class="btn-warn" onclick="renameCollection('${c.name}')">Rename</button>
         <button class="btn-danger" onclick="deleteCollection('${c.name}')">Delete</button>
@@ -768,7 +769,30 @@ let _collectionFlags = {};  // name → { vector_indexed, graph_indexed }
 
 function updateQueryMethodAvailability() {
   const col = $('sel-qry-col').value;
-  const flags = _collectionFlags[col] || { vector_indexed: false, graph_indexed: false };
+  const flags = _collectionFlags[col] || { vector_indexed: false, graph_indexed: false, index_status: 'not_indexed' };
+  const hasNewDocs = flags.index_status === 'new_docs';
+  const btnAsk = $('btn-ask');
+  let warning = $('qry-new-docs-warn');
+  if (!warning) {
+    warning = document.createElement('div');
+    warning.id = 'qry-new-docs-warn';
+    warning.style.cssText = 'font-size:.82rem;color:#c2410c;margin-top:6px;padding:6px 10px;background:#fff7ed;border-radius:4px;border:1px solid #fed7aa;display:none';
+    warning.textContent = 'This collection has unindexed documents. Re-index before querying.';
+    btnAsk.parentElement.insertAdjacentElement('afterend', warning);
+  }
+  if (hasNewDocs) {
+    warning.style.display = '';
+    btnAsk.disabled = true;
+    btnAsk.title = 'Re-index the collection first';
+    document.querySelectorAll('input[name="qry-method"]').forEach(r => {
+      r.disabled = true;
+      r.closest('label').style.opacity = '0.4';
+    });
+    return;
+  }
+  warning.style.display = 'none';
+  btnAsk.disabled = false;
+  btnAsk.title = '';
   const rules = {
     vector: flags.vector_indexed,
     graph: flags.graph_indexed,
