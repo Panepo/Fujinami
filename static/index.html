@@ -442,6 +442,13 @@
 
 <script>
 /* -----------------------------------------------------------------------
+   Base URL — handles sub-path reverse proxies (e.g. nginx /fujinami/ → /)
+   window.location.pathname for /fujinami/ → BASE = '/fujinami'
+   window.location.pathname for /         → BASE = ''
+----------------------------------------------------------------------- */
+const BASE = window.location.pathname.replace(/[^/]*$/, '').replace(/\/$/, '');
+
+/* -----------------------------------------------------------------------
    Tabs
 ----------------------------------------------------------------------- */
 function switchTab(name) {
@@ -474,7 +481,7 @@ async function api(method, path, body, isForm) {
   } else if (body) {
     opts.body = body;
   }
-  const res = await fetch(path, opts);
+  const res = await fetch(BASE + path, opts);
   if (!res.ok) {
     let detail = res.statusText;
     try { detail = (await res.json()).detail ?? detail; } catch (_) {}
@@ -1220,7 +1227,7 @@ let _vBatchFile = null;
 
 async function loadVerifyMetrics() {
   try {
-    const res = await fetch('/api/metrics');
+    const res = await fetch(BASE + '/api/metrics');
     if (!res.ok) throw new Error(await res.text());
     _vAllMetrics = await res.json();
     renderVerifyMetrics();
@@ -1309,7 +1316,7 @@ async function runVerifySingle() {
   $('v-single-results').innerHTML = '';
 
   try {
-    const res = await fetch('/api/evaluate/single', {
+    const res = await fetch(BASE + '/api/evaluate/single', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -1367,7 +1374,7 @@ async function runVerifyBatch() {
   $('v-batch-results').innerHTML = '';
 
   try {
-    const res = await fetch('/api/evaluate/batch', { method: 'POST', body: form });
+    const res = await fetch(BASE + '/api/evaluate/batch', { method: 'POST', body: form });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
     renderVBatchResults(data.results, 'v-batch-results');
