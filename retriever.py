@@ -177,30 +177,32 @@ class RagRetriever:
         """Return all chunks stored in LanceDB for *filename*, sorted by chunk_index."""
         if not self._ensure_table():
             return []
-        try:
-            df = self._table.to_pandas()
-            rows = df[df["doc_id"] == filename]
-            chunks = []
-            for _, row in rows.iterrows():
-                try:
-                    meta = json.loads(row.get("metadata", "{}"))
-                except (json.JSONDecodeError, TypeError):
-                    meta = {}
-                raw_text = row.get("text")
-                chunks.append(
-                    {
-                        "chunk_index": meta.get("chunk_index", 0),
-                        "text": raw_text if isinstance(raw_text, str) else "",
-                        "chunk_type": meta.get("chunk_type"),
-                        "page_number": meta.get("page_number"),
-                        "section_title": meta.get("section_title"),
-                        "language": meta.get("language"),
-                    }
-                )
-            return sorted(chunks, key=lambda c: c["chunk_index"])
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Failed to get chunks for '%s': %s", filename, exc)
-            return []
+        safe_id = filename.replace("'", "''")
+        rows = (
+            self._table
+            .search(None)
+            .where(f"doc_id = '{safe_id}'")
+            .select(["text", "metadata"])
+            .to_list()
+        )
+        chunks = []
+        for row in rows:
+            try:
+                meta = json.loads(row.get("metadata") or "{}")
+            except (json.JSONDecodeError, TypeError):
+                meta = {}
+            raw_text = row.get("text")
+            chunks.append(
+                {
+                    "chunk_index": meta.get("chunk_index", 0),
+                    "text": raw_text if isinstance(raw_text, str) else "",
+                    "chunk_type": meta.get("chunk_type"),
+                    "page_number": meta.get("page_number"),
+                    "section_title": meta.get("section_title"),
+                    "language": meta.get("language"),
+                }
+            )
+        return sorted(chunks, key=lambda c: c["chunk_index"])
 
     # ------------------------------------------------------------------
     # Internal helpers

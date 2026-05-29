@@ -346,17 +346,37 @@ async def get_document_chunks(name: str, filename: str) -> list[DocumentChunk]:
     rag = _get_service(name)
     if "/" in filename or "\\" in filename or ".." in filename:
         raise HTTPException(status_code=400, detail="Invalid filename")
-    chunks = rag.get_document_chunks(filename)
+    try:
+        chunks = rag.get_document_chunks(filename)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"chunk lookup failed: {exc}") from exc
     return [
         DocumentChunk(
             chunk_index=c["chunk_index"],
-            text=c["text"],
+            text=c["text"] if isinstance(c.get("text"), str) else "",
             chunk_type=c.get("chunk_type"),
             section_title=c.get("section_title"),
             page_number=c.get("page_number"),
         )
         for c in chunks
     ]
+
+
+@app.get("/collections/{name}/debug/table")
+async def debug_table(name: str) -> JSONResponse:
+    """Diagnostic: return LanceDB table row count and unique doc_ids."""
+    rag = _get_service(name)
+    retriever = rag.retriever
+    try:
+        if not retriever._ensure_table():
+            return JSONResponse({"error": "table does not exist"})
+        tbl = retriever._table
+        arrow = tbl.to_arrow()
+        total_rows = arrow.num_rows
+        doc_ids = sorted(set(arrow.column("doc_id").to_pylist()))
+        return JSONResponse({"total_rows": total_rows, "doc_ids": doc_ids})
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)})
 
 
 # ---------------------------------------------------------------------------
