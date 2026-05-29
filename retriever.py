@@ -186,10 +186,11 @@ class RagRetriever:
                     meta = json.loads(row.get("metadata", "{}"))
                 except (json.JSONDecodeError, TypeError):
                     meta = {}
+                raw_text = row.get("text")
                 chunks.append(
                     {
                         "chunk_index": meta.get("chunk_index", 0),
-                        "text": row.get("text", ""),
+                        "text": raw_text if isinstance(raw_text, str) else "",
                         "chunk_type": meta.get("chunk_type"),
                         "page_number": meta.get("page_number"),
                         "section_title": meta.get("section_title"),

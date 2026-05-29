@@ -468,16 +468,21 @@ async function loadDocuments() {
 
 function renderDocumentsTable(col, docs) {
   const tbody = $('tbl-documents').querySelector('tbody');
-  tbody.innerHTML = docs.map(d => `
-    <tr>
-      <td>${d.filename}</td>
+  tbody.innerHTML = '';
+  docs.forEach((d, i) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${escHtml(d.filename)}</td>
       <td>${fmt(d.size_bytes)}</td>
       <td style="white-space:nowrap">
-        <button class="btn-primary" onclick="viewDocumentChunks('${col}','${d.filename}')">View</button>
-        <a class="btn-primary btn-dl" href="${BASE}/collections/${col}/documents/${encodeURIComponent(d.filename)}/download" download="${d.filename}">Download</a>
-        <button class="btn-danger" onclick="deleteDocument('${col}','${d.filename}')">Delete</button>
-      </td>
-    </tr>`).join('');
+        <button class="btn-primary view-btn">View</button>
+        <a class="btn-primary btn-dl" href="${BASE}/collections/${escHtml(col)}/documents/${encodeURIComponent(d.filename)}/download" download="${escHtml(d.filename)}">Download</a>
+        <button class="btn-danger del-btn">Delete</button>
+      </td>`;
+    tr.querySelector('.view-btn').addEventListener('click', () => viewDocumentChunks(col, d.filename));
+    tr.querySelector('.del-btn').addEventListener('click', () => deleteDocument(col, d.filename));
+    tbody.appendChild(tr);
+  });
 }
 
 async function viewDocumentChunks(col, filename) {
@@ -510,15 +515,16 @@ async function viewDocumentChunks(col, filename) {
       if (c.page_number != null) parts.push('p.' + c.page_number);
       return parts.length ? `<span style="color:#94a3b8;font-size:.76rem;margin-left:6px">${parts.join(' · ')}</span>` : '';
     };
-    chunks.forEach(c => {
+    chunks.forEach((c, idx) => {
       const item = document.createElement('div');
-      item.className = 'chunk-item';
+      const text = (c.text != null) ? String(c.text) : '';
+      item.className = idx === 0 ? 'chunk-item open' : 'chunk-item';
       item.innerHTML = `
         <div class="chunk-header" onclick="this.parentElement.classList.toggle('open')">
           <span>${chunkTypeBadge(c.chunk_type)}Chunk ${c.chunk_index}${chunkMeta(c)}</span>
-          <span style="color:#94a3b8;font-size:.78rem">${c.text.length} chars ▾</span>
+          <span style="color:#94a3b8;font-size:.78rem">${text.length} chars ▾</span>
         </div>
-        <div class="chunk-body">${escHtml(c.text)}</div>`;
+        <div class="chunk-body">${escHtml(text)}</div>`;
       listEl.appendChild(item);
     });
   } catch(e) {
