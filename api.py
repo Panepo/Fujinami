@@ -37,10 +37,6 @@ from models import (
     CollectionRenameRequest,
     DocumentChunk,
     DocumentInfo,
-    EvaluateBatchResponse,
-    EvaluateBatchSampleResult,
-    EvaluateSingleRequest,
-    EvaluateSingleResponse,
     IndexRequest,
     IndexResponse,
     IndexStatusResponse,
@@ -426,9 +422,46 @@ async def get_index_status(name: str, task_id: str) -> IndexStatusResponse:
     return status
 
 
-# ---------------------------------------------------------------------------
-# Query endpoint
-# ---------------------------------------------------------------------------
+async def _run_rebuild(task_id: str, rag: RagService) -> None:
+    _tasks[task_id].status = "running"
+    try:
+        count = await rag._indexer.rebuild_from_embedded()
+        rag._retriever.reload_table()
+        _tasks[task_id].status = "done"
+        _tasks[task_id].detail = f"Rebuilt from {count} embedded.json file(s)"
+    except Exception as exc:  # noqa: BLE001
+        tb = traceback.extract_tb(exc.__traceback__)
+        origin = tb[-1] if tb else None
+        location = (
+            f"{origin.filename}:{origin.lineno} in {origin.name}"
+            if origin
+            else "unknown location"
+        )
+        _logger.exception(
+            "Rebuild task %s failed at %s – %s: %s",
+            task_id,
+            location,
+            type(exc).__name__,
+            exc,
+        )
+        _tasks[task_id].status = "error"
+        _tasks[task_id].detail = f"{type(exc).__name__}: {exc} (at {location})"
+
+
+@app.post("/collections/{name}/rebuild", response_model=IndexResponse, status_code=202)
+async def trigger_rebuild(name: str, background_tasks: BackgroundTasks) -> IndexResponse:
+    """Rebuild the LanceDB table from cached embedded.json files (no re-embedding).
+
+    Use this after an indexer fix to re-populate the vector store without
+    re-parsing or re-embedding documents.
+    """
+    rag = _get_service(name)
+    task_id = str(uuid.uuid4())
+    _tasks[task_id] = IndexStatusResponse(task_id=task_id, collection=name, status="pending")
+    background_tasks.add_task(_run_rebuild, task_id, rag)
+    return IndexResponse(collection=name, status="pending", task_id=task_id)
+
+
 
 
 async def _stream_answer(
@@ -635,104 +668,6 @@ async def get_graph_triples(
 
 
 # ---------------------------------------------------------------------------
-# RAGAS evaluation endpoints
-# ---------------------------------------------------------------------------
-
-
-@app.get("/api/metrics")
-async def list_metrics() -> list[dict]:
-    """Return the available RAGAS metric definitions."""
-    from ragas_runner import registry_as_list  # noqa: PLC0415
-
-    return registry_as_list()
-
-
-@app.post("/api/evaluate/single", response_model=EvaluateSingleResponse)
-async def evaluate_single(body: EvaluateSingleRequest) -> EvaluateSingleResponse:
-    """Run RAGAS evaluation for a single query/response/context sample."""
-    from ragas_runner import run_evaluation  # noqa: PLC0415
-
-    sample = {
-        "user_input": body.user_input,
-        "retrieved_contexts": body.retrieved_contexts,
-        "response": body.response,
-        "reference": body.reference,
-    }
-    # Remove empty optional fields so RAGAS doesn't see them as present-but-empty
-    sample = {k: v for k, v in sample.items() if v not in ("", [])}
-
-    try:
-        scores = await run_evaluation([sample], body.metrics)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-    return EvaluateSingleResponse(scores=scores)
-
-
-@app.post("/api/evaluate/batch", response_model=EvaluateBatchResponse)
-async def evaluate_batch(
-    file: UploadFile,
-    metrics: str = Form(...),
-) -> EvaluateBatchResponse:
-    """
-    Run RAGAS evaluation for a batch of samples.
-
-    Accepts a JSON array or CSV file.  The ``metrics`` form field must be a
-    JSON-encoded list of metric IDs.
-    """
-    from ragas_runner import run_evaluation_per_sample  # noqa: PLC0415
-
-    try:
-        metric_ids: list[str] = json.loads(metrics)
-    except (json.JSONDecodeError, TypeError) as exc:
-        raise HTTPException(status_code=422, detail="'metrics' must be a JSON array string") from exc
-
-    content = await file.read()
-    filename = (file.filename or "").lower()
-
-    samples: list[dict] = []
-    if filename.endswith(".json"):
-        try:
-            samples = json.loads(content.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise HTTPException(status_code=422, detail=f"Invalid JSON file: {exc}") from exc
-        if not isinstance(samples, list):
-            raise HTTPException(status_code=422, detail="JSON file must contain an array of objects")
-    elif filename.endswith(".csv"):
-        try:
-            text = content.decode("utf-8")
-            reader = csv.DictReader(io.StringIO(text))
-            for row in reader:
-                sample: dict = dict(row)
-                # retrieved_contexts column may be a JSON array string
-                if "retrieved_contexts" in sample and isinstance(sample["retrieved_contexts"], str):
-                    try:
-                        sample["retrieved_contexts"] = json.loads(sample["retrieved_contexts"])
-                    except json.JSONDecodeError:
-                        # Treat as a single context if not valid JSON
-                        sample["retrieved_contexts"] = [sample["retrieved_contexts"]]
-                samples.append(sample)
-        except (UnicodeDecodeError, csv.Error) as exc:
-            raise HTTPException(status_code=422, detail=f"Invalid CSV file: {exc}") from exc
-    else:
-        raise HTTPException(status_code=422, detail="File must be .json or .csv")
-
-    if not samples:
-        raise HTTPException(status_code=422, detail="File contains no samples")
-
-    try:
-        per_sample_scores = await run_evaluation_per_sample(samples, metric_ids)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-    results = [
-        EvaluateBatchSampleResult(sample=s, scores=scores)
-        for s, scores in zip(samples, per_sample_scores)
-    ]
-    return EvaluateBatchResponse(results=results)
-
-
-# ---------------------------------------------------------------------------
 # Environment config endpoint
 # ---------------------------------------------------------------------------
 
@@ -749,7 +684,7 @@ _ENV_VARS: list[dict] = [
     {"key": "CHUNK_OVERLAP",     "default": "80",        "description": "Overlap between consecutive chunks"},
     {"key": "GRAPH_EXTRACTOR",   "default": "hybrid",    "description": "Entity extractor: hybrid | llm | spacy"},
     {"key": "EXTRACT_MODEL",     "default": "",          "description": "Model used by the LLM graph extractor"},
-    {"key": "RAGAS_MODEL",       "default": "",          "description": "Model used for RAGAS evaluation"},
+
     {"key": "OLLAMA_TIMEOUT",    "default": "1800",      "description": "Timeout (s) for Ollama API calls"},
 ]
 

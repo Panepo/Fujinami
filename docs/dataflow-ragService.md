@@ -15,8 +15,8 @@
 │  │  .xlsx .pptx │   │  /index  (async background task)     │  │
 │  │  .md .html   │   │  /query  (vector | graph | hybrid)   │  │
 │  │  .png .jpg   │   │  /graph  (triple browsing)           │  │
-│  │  .wav .mp3   │   │  /api/evaluate  (RAGAS)              │  │
-│  │  .mp4 …      │   └──────────────┬───────────────────────┘  │
+│  │  .wav .mp3   │   └──────────────┬───────────────────────┘  │
+│  │  .mp4 …      │                 │                          │
 │  └──────────────┘                  │                          │
 │                          ┌─────────┴──────────┐               │
 │                          │                    │               │
@@ -398,14 +398,6 @@ Returns `409` if `index_status == "new_docs"`.
 | :--- | :--- | :--- |
 | `GET` | `/collections/{name}/graph/stats` | Triple count in `graph_triples` table |
 | `GET` | `/collections/{name}/graph` | Browse triples; optional query params: `source_doc`, `subject_type`, `predicate` |
-
-### RAGAS Evaluation
-
-| Method | Path | Description |
-| :--- | :--- | :--- |
-| `GET` | `/api/metrics` | List available RAGAS metric definitions |
-| `POST` | `/api/evaluate/single` | Evaluate a single sample |
-| `POST` | `/api/evaluate/batch` | Evaluate a batch from JSON or CSV upload |
 
 ---
 

@@ -15,7 +15,6 @@ A hybrid **Retrieval-Augmented Generation (RAG)** system that combines a local k
 - **Knowledge graph browser** — REST endpoints to inspect and filter extracted triples
 - **Built-in Web UI** — zero-configuration browser interface served at `/`
 - **Fully local** — all LLM, embedding, and VLM calls go to Ollama; no cloud APIs required
-- **RAGAS evaluation** — score RAG responses against 10 built-in metrics (Faithfulness, Context Recall, Context Precision, Response Relevancy, Factual Correctness, Noise Sensitivity, Semantic Similarity, BLEU, ROUGE) using a locally-hosted LLM
 
 ---
 
@@ -114,11 +113,8 @@ VLM_TIMEOUT=180
 # Optional: number of vector search results to return (default 5)
 TOP_K=5
 
-# Model used for RAGAS evaluation (needs large context window, e.g. gemma4:e4b)
-RAGAS_MODEL=gemma4:e4b
-
-# Optional: Ollama request timeout for RAGAS evaluation in seconds (default 1800)
-OLLAMA_TIMEOUT=1800
+# Optional: number of vector search results to return (default 5)
+TOP_K=5
 ```
 
 > If you only have one Ollama instance, set both `OLLAMA_INDEX_URL` and `OLLAMA_CHAT_URL` to the same URL.
@@ -224,47 +220,6 @@ GET /collections/{name}/graph         # browse triples
                                       # optional query params: source_doc, subject_type, predicate
 ```
 
-#### RAGAS Evaluation
-
-```http
-GET  /api/metrics                  # list available metrics and their required fields
-POST /api/evaluate/single          # evaluate a single sample
-POST /api/evaluate/batch           # evaluate a batch from a JSON or CSV file
-```
-
-**Single evaluation** (`POST /api/evaluate/single`):
-
-```json
-{
-  "user_input": "What are the main roles in the system?",
-  "response": "The main roles are Master, User, and Viewer.",
-  "retrieved_contexts": ["Masters can manage …", "Viewers can only read …"],
-  "reference": "The system has three roles: Master, User, and Viewer.",
-  "metrics": ["faithfulness", "llm_context_recall", "response_relevancy"]
-}
-```
-
-Returns `{ "scores": { "faithfulness": 0.95, "llm_context_recall": 0.88, … } }`.
-
-**Batch evaluation** (`POST /api/evaluate/batch`):
-
-Upload a `.json` (array of sample objects) or `.csv` file via `multipart/form-data` with a `metrics` form field (JSON-encoded list of metric IDs).
-
-**Available metric IDs:**
-
-| ID | Display Name | Required Fields | LLM | Embeddings |
-|---|---|---|---|---|
-| `faithfulness` | Faithfulness | `user_input`, `response`, `retrieved_contexts` | ✓ | |
-| `llm_context_recall` | LLM Context Recall | `user_input`, `retrieved_contexts`, `reference` | ✓ | |
-| `llm_context_precision` | LLM Context Precision | `user_input`, `retrieved_contexts`, `reference` | ✓ | |
-| `context_precision_without_reference` | Context Precision (No Ref) | `user_input`, `response`, `retrieved_contexts` | ✓ | |
-| `response_relevancy` | Response Relevancy | `user_input`, `response` | ✓ | ✓ |
-| `factual_correctness` | Factual Correctness | `response`, `reference` | ✓ | |
-| `noise_sensitivity` | Noise Sensitivity | `user_input`, `retrieved_contexts`, `response`, `reference` | ✓ | |
-| `semantic_similarity` | Semantic Similarity | `response`, `reference` | | ✓ |
-| `bleu_score` | BLEU Score | `response`, `reference` | | |
-| `rouge_score` | ROUGE Score | `response`, `reference` | | |
-
 ---
 
 ## Project Structure
@@ -276,7 +231,6 @@ Fujinami/
 ├── ragService.py               # RagService: thin facade over RagIndexer + RagRetriever
 ├── retriever.py                # RagRetriever: vector search, graph context, response generation
 ├── document_loader.py          # Docling-based loader; converts all formats to chunked output
-├── ragas_runner.py             # RAGAS metric registry and async evaluation runner
 ├── models.py                   # Pydantic request/response schemas
 ├── pyproject.toml              # Project metadata and poe tasks
 ├── indexer/                    # RagIndexer package

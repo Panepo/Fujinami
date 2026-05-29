@@ -37,7 +37,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /install /usr/local
 
 # Copy application source
-COPY api.py models.py ragService.py retriever.py document_loader.py ragas_runner.py __init__.py ./
+COPY api.py models.py ragService.py retriever.py document_loader.py __init__.py ./
 COPY indexer/ ./indexer/
 COPY graph_engine/ ./graph_engine/
 COPY static/ ./static/
@@ -59,7 +59,6 @@ ENV PYTHONUNBUFFERED=1 \
     GRAPH_EXTRACTOR=hybrid \
     GRAPH_CHUNK_SIZE=400 \
     GRAPH_CHUNK_OVERLAP=80 \
-    RAGAS_MODE=gemma4:31b \
     TOP_K=5
 
 EXPOSE 8000

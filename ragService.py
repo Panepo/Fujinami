@@ -61,6 +61,18 @@ class RagService:
         self._retriever = RagRetriever(**kwargs)
 
     # ------------------------------------------------------------------
+    # Public accessors
+    # ------------------------------------------------------------------
+
+    @property
+    def indexer(self) -> RagIndexer:
+        return self._indexer
+
+    @property
+    def retriever(self) -> RagRetriever:
+        return self._retriever
+
+    # ------------------------------------------------------------------
     # Indexing (delegated to RagIndexer)
     # ------------------------------------------------------------------
 

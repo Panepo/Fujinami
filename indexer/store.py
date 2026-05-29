@@ -117,7 +117,7 @@ def upsert_from_embedded_json(db: Any, table: Any, path: Path) -> Any:
             {
                 "id": f"{filename}#{i}",
                 "doc_id": filename,
-                "text": chunk.get("chunk_text_original", ""),
+                "text": chunk.get("chunk_text_embedded") or chunk.get("chunk_text_original", ""),
                 "vector": chunk.get("embedding", []),
                 "metadata": json.dumps(meta),
             }

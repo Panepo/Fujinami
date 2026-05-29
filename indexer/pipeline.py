@@ -340,3 +340,39 @@ class RagIndexer:
             len(embedded_chunks),
         )
         return output_path
+
+    async def rebuild_from_embedded(self) -> int:
+        """Rebuild the LanceDB table from all cached embedded.json files.
+
+        Drops all existing rows, then upserts every
+        ``ragdata/{collection}/embedded/*.embedded.json`` found on disk.
+        Does **not** re-embed or re-parse documents — uses the cached
+        ``chunk_text_embedded`` text that was stored during the original
+        indexing run.
+
+        Returns
+        -------
+        int
+            Number of embedded.json files processed.
+        """
+        embedded_dir = self._ragdata_dir / "embedded"
+        paths = sorted(embedded_dir.glob("*.embedded.json")) if embedded_dir.exists() else []
+        if not paths:
+            logger.warning("rebuild_from_embedded: no embedded.json files found in %s", embedded_dir)
+            return 0
+
+        # Drop and recreate the table so stale rows are gone
+        import lancedb as _lancedb  # noqa: PLC0415
+        from indexer.store import _TABLE_NAME as _TN  # noqa: PLC0415
+
+        if _TN in self._db.table_names():
+            self._db.drop_table(_TN)
+            logger.info("rebuild_from_embedded: dropped existing LanceDB table '%s'", _TN)
+        self._table = None
+
+        for path in paths:
+            self._table = upsert_from_embedded_json(self._db, self._table, path)
+            logger.info("rebuild_from_embedded: upserted %s", path.name)
+
+        logger.info("rebuild_from_embedded: done, processed %d file(s)", len(paths))
+        return len(paths)

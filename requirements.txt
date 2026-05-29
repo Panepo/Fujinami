@@ -4,7 +4,6 @@ semantic-kernel[ollama]
 lancedb
 pyarrow
 requests
-ragas>=0.2
 litellm
 openai
 spacy

@@ -90,28 +90,3 @@ class DocumentChunk(BaseModel):
     section_title: str | None = None
     page_number: int | None = None
 
-
-# ---------------------------------------------------------------------------
-# RAGAS evaluation models
-# ---------------------------------------------------------------------------
-
-
-class EvaluateSingleRequest(BaseModel):
-    user_input: str = ""
-    retrieved_contexts: list[str] = []
-    response: str = ""
-    reference: str = ""
-    metrics: list[str]
-
-
-class EvaluateSingleResponse(BaseModel):
-    scores: dict[str, float | None]
-
-
-class EvaluateBatchSampleResult(BaseModel):
-    sample: dict
-    scores: dict[str, float | None]
-
-
-class EvaluateBatchResponse(BaseModel):
-    results: list[EvaluateBatchSampleResult]

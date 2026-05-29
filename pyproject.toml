@@ -15,7 +15,6 @@ dependencies = [
     "openpyxl",
     "pywin32",
     "poethepoet",
-    "ragas>=0.2",
     "litellm",
     "openai",
     "docling[asr]",
