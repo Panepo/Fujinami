@@ -474,7 +474,7 @@ function renderDocumentsTable(col, docs) {
       <td>${fmt(d.size_bytes)}</td>
       <td style="white-space:nowrap">
         <button class="btn-primary" onclick="viewDocumentChunks('${col}','${d.filename}')">View</button>
-        <a class="btn-primary btn-dl" href="/collections/${col}/documents/${encodeURIComponent(d.filename)}/download" download="${d.filename}">Download</a>
+        <a class="btn-primary btn-dl" href="${BASE}/collections/${col}/documents/${encodeURIComponent(d.filename)}/download" download="${d.filename}">Download</a>
         <button class="btn-danger" onclick="deleteDocument('${col}','${d.filename}')">Delete</button>
       </td>
     </tr>`).join('');
@@ -856,7 +856,7 @@ async function streamQuery(col, query, method) {
   box.textContent = '';
 
   try {
-    const resp = await fetch(`/collections/${col}/query`, {
+    const resp = await fetch(BASE + `/collections/${col}/query`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ query, method, stream: true }),
