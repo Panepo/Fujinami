@@ -1,8 +1,7 @@
---pre
 semantic-kernel[ollama]
 lancedb
 pyarrow
-docling[asr]
+requests
 ragas>=0.2
 litellm
 openai
@@ -11,3 +10,4 @@ langdetect
 openpyxl
 langchain-text-splitters
 python-pptx
+reportlab

@@ -7,12 +7,10 @@ FROM python:3.12-slim AS builder
 
 WORKDIR /build
 
-# System libraries required by docling (libGL via opencv-headless, lancedb, etc.)
-# and spaCy (build tools for wheel compilation)
+# System libraries required by spaCy (build tools for wheel compilation) and lancedb
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         libglib2.0-0 \
-        ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
@@ -22,10 +20,6 @@ RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 # Download the bundled spaCy model used by graph_engine extractors and retriever
 RUN PYTHONPATH=/install/lib/python3.12/site-packages \
     python -m spacy download en_core_web_sm
-
-# Pre-bake Docling layout/OCR models (~1 GB) to avoid cold-start at runtime
-RUN PYTHONPATH=/install/lib/python3.12/site-packages \
-    python -c "from docling.utils.model_downloader import download_models; download_models(force=True)"
 
 # ---------------------------------------------------------------------------
 # Runtime stage
@@ -37,12 +31,10 @@ WORKDIR /app
 # Runtime system libraries
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libglib2.0-0 \
-        ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy installed packages + pre-baked Docling models + spaCy model from builder
+# Copy installed packages + spaCy model from builder
 COPY --from=builder /install /usr/local
-COPY --from=builder /root/.cache/docling /root/.cache/docling
 
 # Copy application source
 COPY api.py models.py ragService.py retriever.py document_loader.py ragas_runner.py __init__.py ./
@@ -56,7 +48,7 @@ VOLUME ["/app/data", "/app/ragdata"]
 # Environment variable defaults (override at runtime via --env or compose env_file)
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    DOCLING_ARTIFACTS_PATH=/root/.cache/docling/models \
+    DOCLING_URL=http://docling-serve:5001 \
     OLLAMA_INDEX_URL=http://host.docker.internal:11434 \
     OLLAMA_CHAT_URL=http://host.docker.internal:11434 \
     CHAT_MODEL=gemma4:e2b \

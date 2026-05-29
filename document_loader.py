@@ -4,14 +4,14 @@ DocumentLoader — 5-stage structured pipeline for document ingestion.
 Pipeline: parse → tables → vision → text_chunk → metadata
 
 For supported rich formats (PDF, DOCX, PPTX, XLSX, images):
-  Stage 1  (parse)     — Docling element walk: headings, paragraphs, tables, pictures
+  Stage 1  (parse)     — docling-serve HTTP conversion: headings, paragraphs, tables, pictures
   Stage 2  (tables)    — table classification + LLM narration
   Stage 3  (vision)    — 3-pass Ollama VLM image summarization
   Stage 4  (chunking)  — RCTS chunking with contextual prefix (CJK-aware)
   Stage 5  (metadata)  — language detection, SHA-256 hash, chunk_type assignment
 
 For passthrough formats (audio/video, VTT, HTML, MD, ADOC, TEX):
-  Docling → Markdown export, wrapped as a single text chunk.
+  docling-serve → Markdown export, wrapped as a single text chunk.
 
 Returns
 -------
@@ -28,7 +28,6 @@ import logging
 import os
 import re
 import tempfile
-import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -586,14 +585,14 @@ class DocumentLoader:
     Loads documents using a 5-stage structured pipeline.
 
     For rich formats (PDF, DOCX, PPTX, XLSX, images), the pipeline:
-      Stage 1 — Docling element walk (headings, paragraphs, tables, pictures)
+      Stage 1 — docling-serve HTTP call (headings, paragraphs, tables, pictures)
       Stage 2 — Table classification + Ollama LLM narration
       Stage 3 — 3-pass Ollama VLM image summarization
       Stage 4 — RCTS text chunking with contextual prefix
       Stage 5 — Language detection, SHA-256 hash, chunk_type assignment
 
     For passthrough formats (audio, video, VTT, HTML, MD, ADOC, TEX):
-      Docling → Markdown, wrapped as a single text chunk.
+      docling-serve → Markdown, wrapped as a single text chunk.
 
     Parameters
     ----------
@@ -603,6 +602,9 @@ class DocumentLoader:
         Ollama VLM model name for image summarization.
     request_timeout:
         HTTP timeout in seconds for Ollama calls.
+    docling_url:
+        Base URL of the docling-serve instance. Defaults to DOCLING_URL env var
+        or ``http://localhost:5001``.
     """
 
     def __init__(
@@ -610,6 +612,7 @@ class DocumentLoader:
         ollama_base_url: str = "http://10.168.3.58:8088",
         vlm_model: str = "llava:7b",
         request_timeout: float = 60.0,
+        docling_url: str = "",
     ) -> None:
         self._base_url = ollama_base_url.rstrip("/")
         self._vlm_model = vlm_model
@@ -619,7 +622,12 @@ class DocumentLoader:
         # Chunk parameters from env
         self._chunk_size = int(os.environ.get("CHUNK_SIZE", "800"))
         self._chunk_overlap = int(os.environ.get("CHUNK_OVERLAP", "80"))
-        self._converter = self._build_converter()
+        # docling-serve base URL (env var takes priority over constructor arg)
+        self._docling_url = (
+            os.environ.get("DOCLING_URL")
+            or docling_url
+            or "http://localhost:5001"
+        ).rstrip("/")
 
     # ------------------------------------------------------------------
     # Public API
@@ -672,12 +680,8 @@ class DocumentLoader:
     # ------------------------------------------------------------------
 
     def _load_passthrough(self, path: Path) -> List[Dict]:
-        """Use Docling→Markdown export, then split into chunks respecting CHUNK_SIZE."""
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", message="Palette images with Transparency",
-                                    category=UserWarning, module="PIL")
-            result = self._converter.convert(str(path))
-        text = result.document.export_to_markdown()
+        """Use docling-serve Markdown export, then split into chunks respecting CHUNK_SIZE."""
+        text = self._convert_file(path, "md")
         doc_stem = path.stem
         orig = text.strip()
         if not orig:
@@ -749,13 +753,8 @@ class DocumentLoader:
             elements = self._parse_excel(path)
             return elements, []
 
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", message="Palette images with Transparency",
-                                    category=UserWarning, module="PIL")
-            result = self._converter.convert(str(path))
-        doc = result.document
-
-        elements, pic_info = self._extract_elements_and_pictures(doc, tmp_dir)
+        json_doc = self._convert_file(path, "json")
+        elements, pic_info = self._extract_elements_and_pictures_from_json(json_doc, tmp_dir)
 
         # PPTX: enhance heading detection
         if ext == ".pptx":
@@ -763,55 +762,34 @@ class DocumentLoader:
 
         return elements, pic_info
 
-    def _item_label(self, item: Any) -> Optional[str]:
+    def _table_to_text_from_json(self, table_item: Dict) -> str:
+        """Render a DoclingDocument table dict to pipe-separated Markdown."""
         try:
-            lbl = item.label
-            if hasattr(lbl, "value"):
-                return lbl.value
-            return str(lbl)
-        except AttributeError:
-            return None
-
-    def _page_no(self, item: Any) -> Optional[int]:
-        try:
-            return item.prov[0].page_no
-        except (IndexError, AttributeError, TypeError):
-            return None
-
-    def _heading_level(self, item: Any) -> Optional[int]:
-        try:
-            lbl = self._item_label(item)
-            if lbl in HEADING_LABELS:
-                lvl = getattr(item, "level", None)
-                if lvl is not None:
-                    return int(lvl)
-                return 1
+            grid = table_item.get("data", {}).get("grid", [])
+            if not grid:
+                return table_item.get("text", "")
+            rows: List[List[str]] = []
+            for row in grid:
+                cells = [cell.get("text", "") or "" for cell in row]
+                rows.append(cells)
+            if not rows:
+                return ""
+            num_cols = max(len(r) for r in rows)
+            rows = [r + [""] * (num_cols - len(r)) for r in rows]
+            lines = [
+                "| " + " | ".join(rows[0]) + " |",
+                "| " + " | ".join(["---"] * num_cols) + " |",
+            ]
+            for row in rows[1:]:
+                lines.append("| " + " | ".join(row) + " |")
+            return "\n".join(lines)
         except Exception:
-            pass
-        return None
+            return table_item.get("text", "")
 
-    def _is_ordered(self, item: Any) -> Optional[bool]:
-        lbl = self._item_label(item)
-        if lbl in LIST_LABELS:
-            return bool(getattr(item, "enumerated", False) or getattr(item, "ordered", False))
-        return None
-
-    def _table_to_text(self, table_item: Any, doc: Any = None) -> str:
-        try:
-            md = table_item.export_to_markdown(doc=doc)
-            if md:
-                return md
-        except Exception:
-            pass
-        try:
-            return table_item.text or ""
-        except Exception:
-            return ""
-
-    def _extract_elements_and_pictures(
-        self, doc: Any, tmp_dir: Path
+    def _extract_elements_and_pictures_from_json(
+        self, json_doc: Dict, tmp_dir: Path
     ) -> Tuple[List[Dict], List[Dict]]:
-        """Walk the document, building element list + extracting pictures to tmp_dir."""
+        """Walk a DoclingDocument JSON dict, building element list + extracting pictures."""
         elements: List[Dict] = []
         pic_info: List[Dict] = []
         eid = 0
@@ -819,11 +797,8 @@ class DocumentLoader:
 
         def _push_heading(text: str, level: int) -> None:
             nonlocal section_stack
-            section_stack = [h for h in section_stack if _heading_depth(h) < level]
+            section_stack = section_stack[:level - 1]
             section_stack.append(text)
-
-        def _heading_depth(h: str) -> int:
-            return section_stack.index(h) + 1 if h in section_stack else 1
 
         def _add(type_: str, text: str, page: Optional[int],
                  heading_level: Optional[int] = None,
@@ -846,118 +821,92 @@ class DocumentLoader:
             eid += 1
             return el
 
-        try:
-            for item, level in doc.iterate_items():
-                text = ""
+        # Build lookup: self_ref -> item dict
+        ref_lookup: Dict[str, Dict] = {}
+        for collection in ("texts", "tables", "pictures", "groups"):
+            for idx, item in enumerate(json_doc.get(collection, [])):
+                self_ref = item.get("self_ref") or f"#/{collection}/{idx}"
+                ref_lookup[self_ref] = item
+
+        def _resolve_ref(ref_str: str) -> Optional[Dict]:
+            item = ref_lookup.get(ref_str)
+            if item:
+                return item
+            parts = ref_str.lstrip("#/").split("/")
+            if len(parts) >= 2:
                 try:
-                    text = item.text or ""
-                except AttributeError:
+                    return json_doc.get(parts[0], [])[int(parts[1])]
+                except (ValueError, IndexError):
                     pass
+            return None
 
-                lbl = self._item_label(item)
-                page = self._page_no(item)
+        def _walk(node: Dict) -> None:
+            nonlocal eid
+            for child_ref in node.get("children", []):
+                ref_str = child_ref.get("$ref", "")
+                if not ref_str:
+                    continue
+                item = _resolve_ref(ref_str)
+                if item is None:
+                    continue
+                # Groups/sections: recurse into their children
+                if "/groups/" in ref_str:
+                    _walk(item)
+                    continue
+                label = item.get("label", "")
+                text = item.get("text") or item.get("orig", "") or ""
+                prov = item.get("prov") or []
+                page = prov[0].get("page_no") if prov else None
 
-                if lbl in HEADING_LABELS:
-                    hl = self._heading_level(item) or level or 1
-                    _push_heading(text, hl)
-                    elements.append(_add("heading", text, page, heading_level=hl))
+                if label in HEADING_LABELS:
+                    try:
+                        lvl = int(item.get("level") or 1)
+                    except (ValueError, TypeError):
+                        lvl = 1
+                    _push_heading(text, lvl)
+                    elements.append(_add("heading", text, page, heading_level=lvl))
 
-                elif lbl in PARAGRAPH_LABELS:
+                elif label in PARAGRAPH_LABELS:
                     if text.strip():
                         elements.append(_add("paragraph", text, page))
 
-                elif lbl in LIST_LABELS:
+                elif label in LIST_LABELS:
                     if text.strip():
-                        marker = getattr(item, "marker", None)
-                        if marker and self._is_ordered(item):
+                        marker = item.get("marker")
+                        is_ord = bool(item.get("enumerated") or item.get("ordered"))
+                        if marker and is_ord:
                             text = f"{marker.strip()} {text}"
-                        elements.append(_add("list_item", text, page,
-                                             ordered=self._is_ordered(item)))
+                        elements.append(_add("list_item", text, page, ordered=is_ord))
 
-                elif lbl in TABLE_LABELS:
-                    ttext = self._table_to_text(item, doc=doc)
+                elif label in TABLE_LABELS:
+                    ttext = self._table_to_text_from_json(item)
                     if ttext.strip():
                         elements.append(_add("table", ttext, page))
 
-                elif lbl in PICTURE_LABELS:
-                    # Track element ID before _add increments eid
+                elif label in PICTURE_LABELS:
                     pic_id = f"e{eid}"
-                    png_path = self._save_picture(item, tmp_dir, pic_id)
+                    png_path = self._save_picture_from_json(item, tmp_dir, pic_id)
                     pic_el = _add("picture", "", page, extra={"png_path": png_path})
                     elements.append(pic_el)
                     if png_path:
                         pic_info.append({"id": pic_id, "png_path": png_path})
 
-        except AttributeError:
-            logger.info("iterate_items not available, using doc.texts/tables")
-            self._fallback_extract(doc, elements, section_stack, _add)
-
-        # Fallback: also scan doc.pictures if iterate_items found none
-        if not pic_info:
-            pic_items = getattr(doc, "pictures", [])
-            for idx, pic_item in enumerate(pic_items):
-                page = self._page_no(pic_item)
-                pic_id = f"epic{idx}"
-                png_path = self._save_picture(pic_item, tmp_dir, pic_id)
-                if png_path:
-                    pic_el = {
-                        "id": pic_id,
-                        "type": "picture",
-                        "text": "",
-                        "page": page,
-                        "section_path": [],
-                        "png_path": png_path,
-                    }
-                    elements.append(pic_el)
-                    pic_info.append({"id": pic_id, "png_path": png_path})
-
+        _walk(json_doc.get("body", {}))
         return elements, pic_info
 
-    def _fallback_extract(self, doc: Any, elements: List[Dict],
-                          section_stack: List[str], _add) -> None:
-        all_items = []
-        for item in getattr(doc, "texts", []):
-            all_items.append((item, self._page_no(item) or 0))
-        for item in getattr(doc, "tables", []):
-            all_items.append((item, self._page_no(item) or 0))
-        all_items.sort(key=lambda x: x[1])
-        for item, _ in all_items:
-            lbl = self._item_label(item)
-            page = self._page_no(item)
-            try:
-                text = item.text or ""
-            except AttributeError:
-                text = ""
-            if lbl in HEADING_LABELS:
-                hl = self._heading_level(item) or 1
-                elements.append(_add("heading", text, page, heading_level=hl))
-            elif lbl in PARAGRAPH_LABELS:
-                if text.strip():
-                    elements.append(_add("paragraph", text, page))
-            elif lbl in LIST_LABELS:
-                if text.strip():
-                    marker = getattr(item, "marker", None)
-                    if marker and self._is_ordered(item):
-                        text = f"{marker.strip()} {text}"
-                    elements.append(_add("list_item", text, page, ordered=self._is_ordered(item)))
-            elif lbl in TABLE_LABELS:
-                ttext = self._table_to_text(item, doc=doc)
-                if ttext.strip():
-                    elements.append(_add("table", ttext, page))
-
-    def _save_picture(self, pic_item: Any, tmp_dir: Path, pic_id: str) -> Optional[str]:
-        """Save a Docling picture item as PNG. Returns path or None."""
+    def _save_picture_from_json(self, pic_item: Dict, tmp_dir: Path, pic_id: str) -> Optional[str]:
+        """Decode an embedded base64 picture from docling-serve JSON and save as PNG."""
         try:
-            img_obj = getattr(pic_item, "image", None)
-            if img_obj is None:
+            image = pic_item.get("image")
+            if not image:
                 return None
-            pil_image = getattr(img_obj, "pil_image", None)
-            if pil_image is None and hasattr(img_obj, "as_pil"):
-                pil_image = img_obj.as_pil()
-            if pil_image is None:
+            uri = image.get("uri", "")
+            if not uri.startswith("data:"):
                 return None
+            _, encoded = uri.split(",", 1)
+            img_bytes = base64.b64decode(encoded)
             png_file = tmp_dir / f"{pic_id}.png"
-            pil_image.save(str(png_file))
+            png_file.write_bytes(img_bytes)
             return str(png_file)
         except Exception as exc:
             logger.debug("Could not save picture %s: %s", pic_id, exc)
@@ -1446,32 +1395,34 @@ class DocumentLoader:
             return ""
 
     # ------------------------------------------------------------------
-    # Converter builder (picture description disabled — handled in Stage 3)
-    # ------------------------------------------------------------------
-    # Converter builder (picture description disabled — handled in Stage 3)
+    # docling-serve HTTP client
     # ------------------------------------------------------------------
 
-    def _build_converter(self):
-        """Build Docling DocumentConverter with picture description disabled."""
-        from docling.datamodel.base_models import InputFormat
-        from docling.datamodel.pipeline_options import PdfPipelineOptions
-        from docling.document_converter import (
-            DocumentConverter,
-            ImageFormatOption,
-            PdfFormatOption,
-            WordFormatOption,
-        )
+    def _convert_file(self, path: Path, to_format: str) -> Any:
+        """POST *path* to docling-serve and return md_content (str) or json_content (dict)."""
+        import requests
 
-        pdf_opts = PdfPipelineOptions()
-        pdf_opts.do_ocr = False
-        pdf_opts.generate_picture_images = True
+        if to_format == "md":
+            form_data = [("to_formats", "md")]
+        else:  # "json"
+            form_data = [
+                ("to_formats", "json"),
+                ("image_export_mode", "embedded"),
+                ("do_ocr", "false"),
+                ("include_images", "true"),
+            ]
 
-        return DocumentConverter(
-            format_options={
-                InputFormat.PDF: PdfFormatOption(pipeline_options=pdf_opts),
-                InputFormat.IMAGE: ImageFormatOption(pipeline_options=pdf_opts),
-                InputFormat.DOCX: WordFormatOption(pipeline_options=pdf_opts),
-            }
-        )
-
+        url = f"{self._docling_url}/v1/convert/file"
+        with open(path, "rb") as fh:
+            resp = requests.post(
+                url,
+                files={"files": (path.name, fh, "application/octet-stream")},
+                data=form_data,
+                timeout=self._timeout,
+            )
+        resp.raise_for_status()
+        doc = resp.json().get("document", {})
+        if to_format == "md":
+            return doc.get("md_content", "")
+        return doc.get("json_content", {})
 
