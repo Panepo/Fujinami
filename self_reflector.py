@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import logging
 
-from models import SelfRagMeta, SourceChunk
+from models import SelfRagMeta, SelfRagStep, SourceChunk
 
 _logger = logging.getLogger(__name__)
 
@@ -63,12 +63,26 @@ class SelfReflector:
     ) -> tuple[str, list[SourceChunk] | None, str | None, SelfRagMeta]:
         """Run the self-RAG loop and return ``(answer, sources, graphrag_context, meta)``."""
 
+        log: list[SelfRagStep] = []
+
         # Step 1 — decide if retrieval is needed
         needed = await self._should_retrieve(query)
+        log.append(SelfRagStep(
+            step="retrieval_check",
+            label="Retrieval needed?",
+            detail=f'Query: "{query}"',
+            result="Yes" if needed else "No",
+            ok=needed,
+        ))
 
         if not needed:
             answer = await self._rag._generate_response(query, "")
-            meta = SelfRagMeta(needed=False, relevant_chunks=0, grounded=True, iterations=0)
+            log.append(SelfRagStep(
+                step="generation",
+                label="Answer generation (no retrieval)",
+                detail="Generated directly from LLM knowledge (no context)",
+            ))
+            meta = SelfRagMeta(needed=False, relevant_chunks=0, grounded=True, iterations=0, process_log=log)
             return answer, None, None, meta
 
         # Retrieval + reflection loop
@@ -88,9 +102,23 @@ class SelfReflector:
             if method != "graph":
                 raw_rows = await self._rag._raw_vector_results(current_query, top_k)
                 vector_context = "\n\n".join(r.get("text", "") for r in raw_rows)
+                log.append(SelfRagStep(
+                    step="vector_search",
+                    label=f"Iteration {iterations}: Vector search",
+                    detail=f'Query: "{current_query}"',
+                    result=f"{len(raw_rows)} chunk(s) retrieved",
+                    ok=len(raw_rows) > 0,
+                ))
 
             if method in ("graph", "hybrid"):
                 graphrag_context = await self._rag._graphrag_search(current_query, method="local")
+                log.append(SelfRagStep(
+                    step="graph_search",
+                    label=f"Iteration {iterations}: Graph search",
+                    detail=f'Query: "{current_query}"',
+                    result="Context retrieved" if graphrag_context else "No graph context",
+                    ok=bool(graphrag_context),
+                ))
 
             # Build SourceChunk list from raw rows
             all_sources: list[SourceChunk] = []
@@ -114,6 +142,14 @@ class SelfReflector:
             else:
                 relevant_sources = []
 
+            log.append(SelfRagStep(
+                step="chunk_filter",
+                label=f"Iteration {iterations}: Relevance filter",
+                detail=f"{len(all_sources)} chunk(s) evaluated",
+                result=f"{len(relevant_sources)} of {len(all_sources)} relevant",
+                ok=len(relevant_sources) > 0,
+            ))
+
             relevant_chunks = len(relevant_sources)
             sources = relevant_sources if relevant_sources else all_sources
 
@@ -128,11 +164,23 @@ class SelfReflector:
 
             merged_context = "\n\n".join(parts)
 
+            log.append(SelfRagStep(
+                step="generation",
+                label=f"Iteration {iterations}: Answer generation",
+                detail=f"Context size: {len(merged_context)} chars",
+            ))
+
             # Generate answer
             answer = await self._rag._generate_response(current_query, merged_context)
 
             # Step 3 — check grounding
             grounded = await self._check_grounding(current_query, answer, merged_context)
+            log.append(SelfRagStep(
+                step="grounding_check",
+                label=f"Iteration {iterations}: Grounding check",
+                result="Grounded ✓" if grounded else "Not grounded ✗",
+                ok=grounded,
+            ))
 
             if grounded:
                 meta = SelfRagMeta(
@@ -140,12 +188,20 @@ class SelfReflector:
                     relevant_chunks=relevant_chunks,
                     grounded=True,
                     iterations=iterations,
+                    process_log=log,
                 )
                 return answer, sources, graphrag_context, meta
 
             # Grounding failed — refine query for next iteration
             if iterations < self._max_iterations:
-                current_query = await self._refine_query(query)
+                refined = await self._refine_query(query)
+                log.append(SelfRagStep(
+                    step="query_refinement",
+                    label=f"Iteration {iterations}: Query refinement",
+                    detail=f'Original: "{query}"',
+                    result=f'Refined: "{refined}"',
+                ))
+                current_query = refined
                 _logger.debug("Self-RAG: grounding failed, refined query: %s", current_query)
 
         # Exhausted iterations
@@ -154,6 +210,7 @@ class SelfReflector:
             relevant_chunks=relevant_chunks,
             grounded=False,
             iterations=iterations,
+            process_log=log,
         )
         return answer, sources, graphrag_context, meta
 

@@ -76,11 +76,20 @@ class SourceChunk(BaseModel):
     full_text: str = ""
 
 
+class SelfRagStep(BaseModel):
+    step: str                    # machine key, e.g. "retrieval_check"
+    label: str                   # human-readable label
+    detail: str | None = None    # extra info / query text / counts
+    result: str | None = None    # outcome string
+    ok: bool | None = None       # pass/fail indicator (None = neutral)
+
+
 class SelfRagMeta(BaseModel):
     needed: bool
     relevant_chunks: int
     grounded: bool
     iterations: int
+    process_log: list[SelfRagStep] = []
 
 
 class QueryResponse(BaseModel):
