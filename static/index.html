@@ -243,11 +243,14 @@
         </div>
         <div style="flex:0;white-space:nowrap">
           <label><input type="checkbox" id="chk-stream" /> stream</label>
+          &nbsp;
+          <label><input type="checkbox" id="chk-self-rag" /> self-RAG</label>
         </div>
         <button class="btn-primary" id="btn-ask" onclick="submitQuery()"><span class="query-spinner" id="spin-ask"></span>Ask</button>
       </div>
       <div id="answer-box"></div>
       <div id="query-stats"></div>
+      <div id="self-rag-meta" style="display:none;margin-top:8px;padding:8px 12px;background:#f0f7ff;border:1px solid #bcd;border-radius:6px;font-size:.82rem;color:#334155"></div>
       <details id="context-detail" style="display:none;margin-top:10px">
         <summary>Context sent to LLM</summary>
         <div id="context-chunks-list" style="margin-top:6px"></div>
@@ -812,11 +815,13 @@ async function submitQuery() {
   const query = $('inp-query').value.trim();
   const method = document.querySelector('input[name="qry-method"]:checked').value;
   const stream = $('chk-stream').checked;
+  const selfRag = $('chk-self-rag').checked;
   if (!col || !query) return;
 
   _queryStart = Date.now();
   $('answer-box').innerHTML = '<div class="thinking-indicator"><div class="thinking-dots"><span></span><span></span><span></span></div>Thinking…</div>';
   $('query-stats').innerHTML = '';
+  $('self-rag-meta').style.display = 'none';
   $('sources-detail').style.display = 'none';
   $('tbl-sources').querySelector('tbody').innerHTML = '';
   clearContextPanel();
@@ -825,10 +830,13 @@ async function submitQuery() {
   btnAsk.disabled = true;
   btnAsk.classList.add('btn-evaluating');
   try {
-    if (stream) {
+    // self-RAG takes precedence over streaming (multi-step reflection is incompatible with SSE)
+    if (selfRag) {
+      await nonStreamQuery(col, query, method, true);
+    } else if (stream) {
       await streamQuery(col, query, method);
     } else {
-      await nonStreamQuery(col, query, method);
+      await nonStreamQuery(col, query, method, false);
     }
   } finally {
     btnAsk.disabled = false;
@@ -836,9 +844,9 @@ async function submitQuery() {
   }
 }
 
-async function nonStreamQuery(col, query, method) {
+async function nonStreamQuery(col, query, method, selfRag = false) {
   try {
-    const res = await api('POST', `/collections/${col}/query`, { query, method, stream: false });
+    const res = await api('POST', `/collections/${col}/query`, { query, method, stream: false, self_rag: selfRag });
     const totalMs = Date.now() - _queryStart;
     $('answer-box').textContent = res.answer;
     const words = res.answer.trim().split(/\s+/).filter(Boolean).length;
@@ -851,7 +859,23 @@ async function nonStreamQuery(col, query, method) {
     if (res.graphrag_context && method !== 'graph') {
       renderGraphragContext(res.graphrag_context);
     }
+    if (res.self_rag_meta) {
+      renderSelfRagMeta(res.self_rag_meta);
+    }
   } catch(e) { $('answer-box').textContent = 'Error: ' + e.message; }
+}
+
+function renderSelfRagMeta(meta) {
+  const panel = $('self-rag-meta');
+  const grounded = meta.grounded
+    ? '<span style="color:#166534;font-weight:600">✓ grounded</span>'
+    : '<span style="color:#991b1b;font-weight:600">✗ not grounded</span>';
+  const needed = meta.needed ? 'yes' : 'no';
+  panel.innerHTML =
+    `<strong>Self-RAG</strong> &mdash; retrieval needed: <strong>${needed}</strong> &nbsp;|&nbsp; ` +
+    `relevant chunks: <strong>${meta.relevant_chunks}</strong> &nbsp;|&nbsp; ` +
+    `${grounded} &nbsp;|&nbsp; iterations: <strong>${meta.iterations}</strong>`;
+  panel.style.display = 'block';
 }
 
 async function streamQuery(col, query, method) {

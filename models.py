@@ -66,6 +66,7 @@ class QueryRequest(BaseModel):
     method: Literal["vector", "graph", "hybrid"] = "hybrid"
     top_k: int = 5
     stream: bool = False
+    self_rag: bool = False
 
 
 class SourceChunk(BaseModel):
@@ -75,12 +76,20 @@ class SourceChunk(BaseModel):
     full_text: str = ""
 
 
+class SelfRagMeta(BaseModel):
+    needed: bool
+    relevant_chunks: int
+    grounded: bool
+    iterations: int
+
+
 class QueryResponse(BaseModel):
     collection: str
     method: str
     answer: str
     sources: list[SourceChunk] | None = None
     graphrag_context: str | None = None
+    self_rag_meta: Optional[SelfRagMeta] = None
 
 
 class DocumentChunk(BaseModel):

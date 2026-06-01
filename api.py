@@ -587,6 +587,23 @@ async def query_collection(name: str, body: QueryRequest):
             ),
         )
 
+    # Self-RAG path — takes precedence over streaming when both flags are set
+    if body.self_rag:
+        from self_reflector import SelfReflector  # noqa: PLC0415
+
+        reflector = SelfReflector(rag)
+        answer, sources, graphrag_context, self_rag_meta = await reflector.query(
+            body.query, body.method, body.top_k
+        )
+        return QueryResponse(
+            collection=name,
+            method=body.method,
+            answer=answer,
+            sources=sources,
+            graphrag_context=graphrag_context,
+            self_rag_meta=self_rag_meta,
+        )
+
     sources: list[SourceChunk] | None = None
     vector_context: str | None = None
     graphrag_context: str | None = None
