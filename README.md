@@ -8,9 +8,11 @@ A hybrid **Retrieval-Augmented Generation (RAG)** system that combines a local k
 
 - **Hybrid search** — blends dense vector search (LanceDB) with local knowledge-graph retrieval (`graph_engine`) for richer answers
 - **Three query modes** — `vector`, `hybrid`, and `graph` (entity/relationship context)
+- **Self-RAG** — optional reflection loop that gates retrieval, filters irrelevant chunks, checks answer grounding, and automatically refines the query when grounding fails
 - **Multi-collection** — manage independent document collections via a REST API
 - **Rich document ingestion** — powered by [Docling](https://github.com/DS4SD/docling); supports documents (`.pdf`, `.docx`, `.xlsx`, `.pptx`, `.md`, `.tex`, `.html`, `.csv`, and more), images (`.png`, `.jpg`, `.jpeg`, `.tiff`, `.bmp`, `.webp`), audio (`.wav`, `.mp3`, `.m4a`, `.aac`, `.ogg`, `.flac`), and video (`.mp4`, `.avi`, `.mov`); embedded pictures are described inline by a VLM via Docling's built-in picture-description pipeline
 - **Incremental indexing** — SHA-256 content-hash delta detection; only new or modified files are reprocessed
+- **Rebuild from cache** — re-populate LanceDB from cached `embedded.json` files without re-parsing or re-embedding
 - **Streaming responses** — optional SSE token-by-token streaming on query endpoints
 - **Knowledge graph browser** — REST endpoints to inspect and filter extracted triples
 - **Built-in Web UI** — zero-configuration browser interface served at `/`
@@ -110,11 +112,14 @@ GRAPH_CHUNK_OVERLAP=80
 # Optional: VLM HTTP timeout in seconds (default 180)
 VLM_TIMEOUT=180
 
-# Optional: number of vector search results to return (default 5)
-TOP_K=5
+# Optional: Ollama API timeout in seconds (default 1800)
+OLLAMA_TIMEOUT=1800
 
 # Optional: number of vector search results to return (default 5)
 TOP_K=5
+
+# Optional: model override used only during indexing (defaults to CHAT_MODEL)
+INDEX_MODEL=
 ```
 
 > If you only have one Ollama instance, set both `OLLAMA_INDEX_URL` and `OLLAMA_CHAT_URL` to the same URL.
@@ -172,7 +177,7 @@ GET    /collections/{name}/documents                           # list uploaded d
 POST   /collections/{name}/documents                           # upload a file (multipart/form-data)
 DELETE /collections/{name}/documents/{filename}                # delete a document
 GET    /collections/{name}/documents/{filename}/download       # download original file
-GET    /collections/{name}/documents/{filename}/embedded       # download per-doc embedded.json
+GET    /collections/{name}/documents/{filename}/embedded       # download per-doc embedded.json (404 if not yet indexed)
 GET    /collections/{name}/documents/{filename}/chunks         # list all LanceDB chunks
 ```
 
@@ -200,7 +205,8 @@ POST /collections/{name}/query
   "query": "What are the main roles in the system?",
   "method": "hybrid",
   "top_k": 5,
-  "stream": false
+  "stream": false,
+  "self_rag": false
 }
 ```
 
@@ -209,8 +215,16 @@ POST /collections/{name}/query
 | `method` | `vector` \| `hybrid` \| `graph` | `hybrid` |
 | `top_k` | integer | `5` |
 | `stream` | `true` \| `false` | `false` |
+| `self_rag` | `true` \| `false` | `false` |
 
-Response includes `answer`, `sources` (chunk excerpts with doc references), and `graphrag_context` (graph triples used).
+Response includes `answer`, `sources` (chunk excerpts with doc references), `graphrag_context` (graph triples used), and `self_rag_meta` (reflection steps and grounding result, when `self_rag: true`).
+
+When `self_rag` is `true`, the query goes through the Self-RAG loop (see [Self-RAG](#self-rag) section). The `self_rag_meta` field in the response contains:
+- `needed` — whether retrieval was judged necessary
+- `relevant_chunks` — number of chunks that passed the relevance filter
+- `grounded` — whether the final answer is grounded in the retrieved context
+- `iterations` — number of retrieval iterations performed
+- `process_log` — step-by-step trace of each decision
 
 #### Knowledge Graph
 
@@ -218,6 +232,33 @@ Response includes `answer`, `sources` (chunk excerpts with doc references), and 
 GET /collections/{name}/graph/stats   # triple count in the graph store
 GET /collections/{name}/graph         # browse triples
                                       # optional query params: source_doc, subject_type, predicate
+```
+
+#### Rebuild
+
+```http
+POST /collections/{name}/rebuild      # rebuild LanceDB from cached embedded.json (no re-embedding)
+                                      # returns { task_id, status } — poll via /collections/{name}/index/{task_id}
+```
+
+Use this after an indexer fix to re-populate the vector store without re-parsing or re-embedding documents.
+
+#### Tasks
+
+```http
+GET /tasks                            # list all pending or running index/rebuild tasks
+```
+
+#### Environment Config
+
+```http
+GET /api/env                          # return current values of all known environment variables
+```
+
+#### Diagnostics
+
+```http
+GET /collections/{name}/debug/table   # LanceDB row count and unique doc_ids (for debugging)
 ```
 
 ---
@@ -228,8 +269,9 @@ GET /collections/{name}/graph         # browse triples
 Fujinami/
 ├── .env                        # environment variables (create this)
 ├── api.py                      # FastAPI application and all HTTP endpoints
-├── ragService.py               # RagService: thin facade over RagIndexer + RagRetriever
+├── rag_service.py              # RagService: thin facade over RagIndexer + RagRetriever
 ├── retriever.py                # RagRetriever: vector search, graph context, response generation
+├── self_reflector.py           # SelfReflector: Self-RAG reflection loop
 ├── document_loader.py          # Docling-based loader; converts all formats to chunked output
 ├── models.py                   # Pydantic request/response schemas
 ├── pyproject.toml              # Project metadata and poe tasks
@@ -259,8 +301,25 @@ Fujinami/
 │       ├── embedded/           #   Per-document embedded.json cache
 │       └── index_flags.json    #   {vector_indexed, graph_indexed}
 └── docs/
-    └── dataflow-ragService.md  # Detailed pipeline and data-flow documentation
+    ├── dataflow-ragService.md      # RAG service pipeline and data-flow documentation
+    ├── dataflow-document_loader.md # Document loading and chunking pipeline
+    └── dataflow-selfReflector.md   # Self-RAG reflection loop documentation
 ```
+
+---
+
+## Self-RAG
+
+When `self_rag: true` is set on a query request, the `SelfReflector` wraps the normal retrieval pipeline with four LLM-gated decisions:
+
+1. **Retrieval needed?** — decides whether the question requires document lookup at all. If not, generates directly from LLM knowledge.
+2. **Relevance filter** — evaluates each retrieved chunk against the query; discards chunks that are not relevant.
+3. **Answer grounding** — checks whether the generated answer is fully supported by the filtered context.
+4. **Query refinement** — if the answer is not grounded, rewrites the query to be more specific and retries (up to `max_iterations`, default 2).
+
+The full step-by-step trace is returned in `self_rag_meta.process_log`.
+
+> **Note:** `self_rag` takes precedence over `stream` when both are `true`. Self-RAG responses are always non-streaming.
 
 ---
 

@@ -26,6 +26,11 @@
 │               │  (indexer/)      │  │  (retriever.py)      │  │
 │               └────────┬─────────┘  └──────────┬───────────┘  │
 │                        │                       │               │
+│                        │            ┌──────────┴────────────┐  │
+│                        │            │  SelfReflector        │  │
+│                        │            │  (self_reflector.py)  │  │
+│                        │            │  self_rag=true path   │  │
+│                        │            └──────────┬────────────┘  │
 │          ┌─────────────┴──────┐                │               │
 │          │                    │                │               │
 │          ▼                    ▼                ▼               │
@@ -336,7 +341,36 @@ OllamaChatCompletion  (CHAT_MODEL)
 
 ---
 
-### 3.4 Streaming (SSE)
+### 3.4 Self-RAG Path (`self_rag=true`)
+
+When the client sets `self_rag: true`, the `query_collection` endpoint bypasses the standard retrieval path entirely and delegates to `SelfReflector`. This mode is mutually exclusive with streaming (`stream: true` is ignored when `self_rag: true`).
+
+```
+POST /collections/{name}/query  { self_rag: true, … }
+       │
+       ▼
+ api.py — query_collection()
+   self_rag=True branch (takes precedence over streaming)
+       │
+       ▼
+ SelfReflector(rag).query(query, method, top_k)
+       │                          (see dataflow-selfReflector.md)
+       ▼
+ (answer, sources, graphrag_context, SelfRagMeta)
+       │
+       ▼
+ QueryResponse {
+   collection, method, answer,
+   sources, graphrag_context,
+   self_rag_meta: SelfRagMeta   ← populated only on self-RAG path
+ }
+```
+
+`SelfRagMeta` carries the full process log (`process_log: list[SelfRagStep]`) so clients can render a step-by-step transparency panel.
+
+---
+
+### 3.5 Streaming (SSE)
 
 When the client sets `stream: true` in the query request, `api.py` returns a `StreamingResponse` with `text/event-stream` media type. Events are emitted in order:
 
@@ -387,9 +421,10 @@ The FastAPI server exposes the following endpoints. All collection-scoped routes
 
 | Method | Path | Body | Description |
 | :--- | :--- | :--- | :--- |
-| `POST` | `/collections/{name}/query` | `{query, method?, top_k?, stream?}` | Query collection. Returns `QueryResponse` or SSE stream |
+| `POST` | `/collections/{name}/query` | `{query, method?, top_k?, stream?, self_rag?}` | Query collection. Returns `QueryResponse` or SSE stream |
 
 `method` values: `vector` · `graph` · `hybrid` (default).
+`self_rag: true` activates the Self-RAG reflection loop; response includes `self_rag_meta`. Takes precedence over `stream`.
 Returns `409` if `index_status == "new_docs"`.
 
 ### Knowledge Graph
@@ -398,6 +433,49 @@ Returns `409` if `index_status == "new_docs"`.
 | :--- | :--- | :--- |
 | `GET` | `/collections/{name}/graph/stats` | Triple count in `graph_triples` table |
 | `GET` | `/collections/{name}/graph` | Browse triples; optional query params: `source_doc`, `subject_type`, `predicate` |
+
+### Response Models
+
+**`QueryRequest`**
+
+| Field | Type | Default | Notes |
+| :--- | :--- | :--- | :--- |
+| `query` | `string` | — | The user query |
+| `method` | `"vector"` \| `"graph"` \| `"hybrid"` | `"hybrid"` | Retrieval strategy |
+| `top_k` | `int` | `5` | Max vector chunks to retrieve |
+| `stream` | `bool` | `false` | Return SSE stream (ignored when `self_rag=true`) |
+| `self_rag` | `bool` | `false` | Activate Self-RAG reflection loop |
+
+**`QueryResponse`**
+
+| Field | Type | Notes |
+| :--- | :--- | :--- |
+| `collection` | `string` | Collection name |
+| `method` | `string` | Retrieval method used |
+| `answer` | `string` | Generated answer text |
+| `sources` | `list[SourceChunk]` \| `null` | Retrieved chunks (null for graph-only) |
+| `graphrag_context` | `string` \| `null` | Graph context string (hybrid/graph only) |
+| `self_rag_meta` | `SelfRagMeta` \| `null` | Populated only when `self_rag=true` |
+
+**`SelfRagMeta`**
+
+| Field | Type | Notes |
+| :--- | :--- | :--- |
+| `needed` | `bool` | Whether retrieval was performed |
+| `relevant_chunks` | `int` | Chunks that survived relevance filtering |
+| `grounded` | `bool` | Whether the final answer passed grounding check |
+| `iterations` | `int` | Number of retrieval/refinement iterations |
+| `process_log` | `list[SelfRagStep]` | Full step-by-step trace |
+
+**`SelfRagStep`**
+
+| Field | Type | Notes |
+| :--- | :--- | :--- |
+| `step` | `string` | Machine key: `retrieval_check`, `vector_search`, `graph_search`, `chunk_filter`, `generation`, `grounding_check`, `query_refinement` |
+| `label` | `string` | Human-readable label |
+| `detail` | `string` \| `null` | Extra context (query text, counts, sizes) |
+| `result` | `string` \| `null` | Outcome description |
+| `ok` | `bool` \| `null` | Pass/fail indicator (`null` = neutral) |
 
 ---
 
