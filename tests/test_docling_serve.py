@@ -29,8 +29,8 @@ import requests
 
 BASE_URL = (
     sys.argv[1]
-    if len(sys.argv) > 1
-    else os.environ.get("DOCLING_URL", "http://localhost:5001")
+    if len(sys.argv) > 1 and sys.argv[1].startswith("http")
+    else os.environ.get("DOCLING_URL", "http://10.68.129.51:5001")
 ).rstrip("/")
 
 TIMEOUT = 120  # seconds — generous for first-run model download
@@ -96,7 +96,7 @@ def _make_test_pdf(path: Path) -> bool:
         # Embed a raster image so docling classifies it as a picture item.
         # Use the project's test image if available, otherwise fall back to
         # a minimal in-memory PNG.
-        _test_img = Path(__file__).parent / "test" / "test_img.jpg"
+        _test_img = Path(__file__).parent / "test_img.jpg"
         if _test_img.exists():
             img_buf = io.BytesIO(_test_img.read_bytes())
         else:
@@ -230,7 +230,7 @@ def test_convert_json(file_path: Path) -> None:
 def test_image_extraction() -> None:
     """POST test/test_img.jpg directly — docling treats image files as picture items."""
     print("\n4. Image extraction (embedded base64)")
-    img_path = Path(__file__).parent / "test" / "test_img.jpg"
+    img_path = Path(__file__).parent / "test_img.jpg"
     if not img_path.exists():
         print(f"     [SKIP] {img_path} not found — skipping image extraction test")
         return

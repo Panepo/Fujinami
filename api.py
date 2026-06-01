@@ -44,7 +44,7 @@ from models import (
     QueryResponse,
     SourceChunk,
 )
-from ragService import SUPPORTED_EXTENSIONS, RagService
+from rag_service import SUPPORTED_EXTENSIONS, RagService
 
 # ---------------------------------------------------------------------------
 # Module-level state
