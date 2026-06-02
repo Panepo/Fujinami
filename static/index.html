@@ -113,6 +113,20 @@
     .srag-result.ok   { background: #dcfce7; color: #166534; }
     .srag-result.fail { background: #fee2e2; color: #991b1b; }
     .srag-result.neutral { background: #f1f5f9; color: #475569; }
+    /* LangGraph Flow panel */
+    #lg-flow-panel { display:none; margin-top:10px; padding:10px 14px; background:#f8faff; border:1px solid #c7d8f0; border-radius:8px; }
+    #lg-flow-panel summary { font-weight:600; font-size:.84rem; color:#334155; cursor:pointer; }
+    .lg-flow-nodes { display:flex; align-items:center; gap:6px; margin-top:8px; flex-wrap:wrap; }
+    .lg-node { display:flex; flex-direction:column; align-items:center; gap:2px; min-width:110px; }
+    .lg-node-box { padding:7px 12px; border-radius:6px; background:#e2eaf6; border:2px solid #94a3b8; font-size:.78rem; font-weight:600; color:#334155; text-align:center; transition:all .25s; white-space:nowrap; }
+    .lg-node-box.active { background:#dbeafe; border-color:#3b82f6; color:#1d4ed8; box-shadow:0 0 0 3px rgba(59,130,246,.2); }
+    .lg-node-box.done   { background:#dcfce7; border-color:#22c55e; color:#166534; }
+    .lg-node-box.skip   { background:#f1f5f9; border-color:#cbd5e1; color:#94a3b8; opacity:.6; }
+    .lg-node-dur { font-size:.7rem; color:#64748b; }
+    .lg-arrow { font-size:1.1rem; color:#94a3b8; flex-shrink:0; }
+    .lg-badge { font-size:.68rem; padding:1px 6px; border-radius:8px; font-weight:700; margin-top:2px; }
+    .lg-badge.graph { background:#fef3c7; color:#92400e; }
+    .lg-badge.skip-graph { background:#f1f5f9; color:#94a3b8; }
   </style>
   <script src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
 </head>
@@ -202,20 +216,6 @@
         <button class="btn-primary" onclick="triggerIndex()">Run Index</button>
         <button id="btn-rebuild" class="btn-warn" onclick="triggerRebuild()" style="display:none" title="Re-populate LanceDB from cached embedded.json files (no re-embedding)">Rebuild Index</button>
       </div>
-      <div style="margin-top:10px">
-        <label style="font-size:.82rem;color:#555">Entity types</label>
-        <div id="entity-types-group" style="display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:5px;font-size:.85rem">
-          <label><input type="checkbox" name="entity-type" value="organization" checked /> organization</label>
-          <label><input type="checkbox" name="entity-type" value="person" checked /> person</label>
-          <label><input type="checkbox" name="entity-type" value="geo" checked /> geo</label>
-          <label><input type="checkbox" name="entity-type" value="event" checked /> event</label>
-          <label><input type="checkbox" name="entity-type" value="concept" checked /> concept</label>
-          <label><input type="checkbox" name="entity-type" value="technology" checked /> technology</label>
-          <label><input type="checkbox" name="entity-type" value="product" checked /> product</label>
-          <label><input type="checkbox" name="entity-type" value="process" checked /> process</label>
-          <label><input type="checkbox" name="entity-type" value="system" checked /> system</label>
-        </div>
-      </div>
       <p class="status-msg" id="idx-status"></p>
       <p class="status-msg" id="rebuild-status" style="color:#b45309"></p>
       <p id="idx-task-id" style="font-size:.8rem;color:#888;margin-top:4px;word-break:break-all;"></p>
@@ -267,6 +267,32 @@
       <details id="self-rag-log-detail" style="display:none;margin-top:8px">
         <summary>Self-RAG Process Log</summary>
         <ul id="self-rag-log-list" class="srag-log"></ul>
+      </details>
+      <details id="lg-flow-panel" open>
+        <summary>LangGraph Flow</summary>
+        <div class="lg-flow-nodes" id="lg-flow-nodes">
+          <div class="lg-node" id="lgn-vector_retrieve">
+            <div class="lg-node-box" id="lgbox-vector_retrieve">vector_retrieve</div>
+            <div class="lg-node-dur" id="lgdur-vector_retrieve"></div>
+          </div>
+          <span class="lg-arrow">→</span>
+          <div class="lg-node" id="lgn-evaluate_context">
+            <div class="lg-node-box" id="lgbox-evaluate_context">evaluate_context</div>
+            <div class="lg-node-dur" id="lgdur-evaluate_context"></div>
+          </div>
+          <span class="lg-arrow">→</span>
+          <div class="lg-node" id="lgn-graph_retrieve">
+            <div class="lg-node-box" id="lgbox-graph_retrieve">graph_retrieve</div>
+            <div class="lg-node-dur" id="lgdur-graph_retrieve"></div>
+            <span class="lg-badge graph" id="lgbadge-graph" style="display:none">graph</span>
+            <span class="lg-badge skip-graph" id="lgbadge-skip" style="display:none">skipped</span>
+          </div>
+          <span class="lg-arrow">→</span>
+          <div class="lg-node" id="lgn-generate_answer">
+            <div class="lg-node-box" id="lgbox-generate_answer">generate_answer</div>
+            <div class="lg-node-dur" id="lgdur-generate_answer"></div>
+          </div>
+        </div>
       </details>
       <details id="context-detail" style="display:none;margin-top:10px">
         <summary>Context sent to LLM</summary>
@@ -660,10 +686,6 @@ async function triggerRebuild() {
 async function triggerIndex() {
   const col = $('sel-idx-col').value;
   if (!col) return;
-  const selectedTypes = Array.from(
-    document.querySelectorAll('input[name="entity-type"]:checked')
-  ).map(el => el.value);
-  const entityTypes = selectedTypes.length > 0 ? selectedTypes : null;
   const mode = document.querySelector('input[name="idx-mode"]:checked')?.value ?? 'all';
   // cancel any existing poll for this collection
   if (_activeJobs[col]) { clearInterval(_activeJobs[col].timer); }
@@ -672,7 +694,7 @@ async function triggerIndex() {
   _activeJobs[col] = { taskId: null, status: 'pending', detail: '', timer: null, errors: 0, startedAt: Date.now() };
   renderActiveJobs();
   try {
-    const res = await api('POST', `/collections/${col}/index`, { entity_types: entityTypes, mode });
+    const res = await api('POST', `/collections/${col}/index`, { mode });
     $('idx-task-id').textContent = 'task_id: ' + res.task_id;
     _activeJobs[col].taskId = res.task_id;
     pollIndexStatus(col, res.task_id);
@@ -938,6 +960,10 @@ async function streamQuery(col, query, method) {
   const box = $('answer-box');
   box.textContent = '';
 
+  // Reset LangGraph flow panel
+  resetLgFlow(method);
+  $('lg-flow-panel').style.display = '';
+
   try {
     const resp = await fetch(BASE + `/collections/${col}/query`, {
       method: 'POST',
@@ -954,6 +980,7 @@ async function streamQuery(col, query, method) {
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buf = '';
+    const lgNodeStart = {};
 
     while (true) {
       const { value, done } = await reader.read();
@@ -973,15 +1000,30 @@ async function streamQuery(col, query, method) {
         if (eventType === 'token') {
           if (firstTokenMs === null) firstTokenMs = Date.now() - _queryStart;
           try { answer += JSON.parse(data); } catch(_) { answer += data; }
-          box.textContent = answer;  // clears thinking indicator on first token
+          box.textContent = answer;
           await new Promise(r => setTimeout(r, 0));
         } else if (eventType === 'chunks') {
           try { renderContextChunks(JSON.parse(data)); } catch(_) {}
         } else if (eventType === 'graphrag') {
-          // For graph-only method the answer IS the graph context — skip duplicate display
           if (method !== 'graph') { try { renderGraphragContext(JSON.parse(data)); } catch(_) {} }
         } else if (eventType === 'sources') {
           try { streamedSources = JSON.parse(data); renderSources(streamedSources); } catch(_) {}
+        } else if (eventType === 'node_enter') {
+          try {
+            const d = JSON.parse(data);
+            lgNodeStart[d.node] = d.timestamp;
+            lgNodeActivate(d.node);
+          } catch(_) {}
+        } else if (eventType === 'node_complete') {
+          try {
+            const d = JSON.parse(data);
+            lgNodeDone(d.node, d.duration_ms);
+          } catch(_) {}
+        } else if (eventType === 'routing_decision') {
+          try {
+            const d = JSON.parse(data);
+            lgRoutingDecision(d.needs_graph);
+          } catch(_) {}
         }
       }
     }
@@ -989,6 +1031,54 @@ async function streamQuery(col, query, method) {
     const words = answer.trim().split(/\s+/).filter(Boolean).length;
     showQueryStats(firstTokenMs ?? totalMs, totalMs, words);
   } catch(e) { box.textContent = 'Error: ' + e.message; }
+}
+
+/* LangGraph flow panel helpers */
+function resetLgFlow(method) {
+  const nodes = ['vector_retrieve', 'evaluate_context', 'graph_retrieve', 'generate_answer'];
+  nodes.forEach(n => {
+    const box = document.getElementById('lgbox-' + n);
+    const dur = document.getElementById('lgdur-' + n);
+    if (box) { box.className = 'lg-node-box'; }
+    if (dur) dur.textContent = '';
+  });
+  const badgeGraph = $('lgbadge-graph');
+  const badgeSkip = $('lgbadge-skip');
+  if (badgeGraph) badgeGraph.style.display = 'none';
+  if (badgeSkip) badgeSkip.style.display = 'none';
+  // For graph-only method, dim vector+evaluate nodes
+  if (method === 'graph') {
+    ['vector_retrieve', 'evaluate_context'].forEach(n => {
+      const box = document.getElementById('lgbox-' + n);
+      if (box) box.classList.add('skip');
+    });
+  }
+}
+
+function lgNodeActivate(node) {
+  const box = document.getElementById('lgbox-' + node);
+  if (box) { box.className = 'lg-node-box active'; }
+}
+
+function lgNodeDone(node, durationMs) {
+  const box = document.getElementById('lgbox-' + node);
+  const dur = document.getElementById('lgdur-' + node);
+  if (box) { box.className = 'lg-node-box done'; }
+  if (dur) dur.textContent = durationMs + ' ms';
+}
+
+function lgRoutingDecision(needsGraph) {
+  const badgeGraph = $('lgbadge-graph');
+  const badgeSkip = $('lgbadge-skip');
+  const box = document.getElementById('lgbox-graph_retrieve');
+  if (needsGraph) {
+    if (badgeGraph) badgeGraph.style.display = '';
+    if (badgeSkip) badgeSkip.style.display = 'none';
+  } else {
+    if (badgeSkip) badgeSkip.style.display = '';
+    if (badgeGraph) badgeGraph.style.display = 'none';
+    if (box) box.classList.add('skip');
+  }
 }
 
 function renderSources(sources) {

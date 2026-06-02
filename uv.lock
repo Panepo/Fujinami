@@ -357,15 +357,15 @@ wheels = [
 
 [[package]]
 name = "agent-framework-ollama"
-version = "1.0.0b260429"
+version = "1.0.0b260311"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "agent-framework-core" },
     { name = "ollama" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/4f/01/249498e6493fcb05fad6dcc398e3dd92f0c08e4bf007cd62df40173147f4/agent_framework_ollama-1.0.0b260429.tar.gz", hash = "sha256:afa9cf37bb21e09d50c5018ff3112b71c983940ad7f107b80f9b957173c1b4bc", size = 10237 }
+sdist = { url = "https://files.pythonhosted.org/packages/f1/44/c2768d347839fb1c41cbb1de12bcd12ded1a788fa9dd8836a98f2bcb3ed2/agent_framework_ollama-1.0.0b260311.tar.gz", hash = "sha256:4529656cc7b3a8f00376cbb3b72e5ec8a1ad475be9a2924911d565c49498c3bb", size = 9985 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/17/bf/bf8f3dfe8ba9cf1c62e704407686ff4a42ed08a44c0225a46fd8b0b6a8c1/agent_framework_ollama-1.0.0b260429-py3-none-any.whl", hash = "sha256:ead9b9aeaff96f0604cf9e10ed5d930314fde435b37d639fad3c42db16b58b1d", size = 12044 },
+    { url = "https://files.pythonhosted.org/packages/62/71/6e51cdabefa518a91c27d5790cce2916b62121d52123cd02283479b2b77e/agent_framework_ollama-1.0.0b260311-py3-none-any.whl", hash = "sha256:04f11f2639185686feab727db5ab3966a3447b03d9e8f7135673e1dac286a17d", size = 11843 },
 ]
 
 [[package]]
@@ -1787,9 +1787,12 @@ dependencies = [
     { name = "agent-framework" },
     { name = "docling", extra = ["asr"] },
     { name = "lancedb" },
+    { name = "langchain-core" },
+    { name = "langchain-ollama" },
     { name = "langchain-text-splitters" },
     { name = "langdetect" },
     { name = "litellm" },
+    { name = "ollama" },
     { name = "openai" },
     { name = "openpyxl" },
     { name = "poethepoet" },
@@ -1809,9 +1812,12 @@ requires-dist = [
     { name = "agent-framework" },
     { name = "docling", extras = ["asr"] },
     { name = "lancedb" },
+    { name = "langchain-core" },
+    { name = "langchain-ollama" },
     { name = "langchain-text-splitters" },
     { name = "langdetect" },
     { name = "litellm" },
+    { name = "ollama", specifier = ">=0.6.0" },
     { name = "openai" },
     { name = "openpyxl" },
     { name = "poethepoet" },
@@ -2394,6 +2400,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/59/de/679a53472c25860837e32c0442c962fa86e95317a36460e2c9d5c91b17c2/langchain_core-1.4.0.tar.gz", hash = "sha256:1dc341eed802ed9c117c0df3923c991e5e9e226571e5725c194eeb5bd93d1a7f", size = 920260 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/0f/1a/86c38c27b81913a1c6c12448cab55defb5a1097c7dc9a4cea83f55477a2d/langchain_core-1.4.0-py3-none-any.whl", hash = "sha256:23cbbdb46e38ddd1dd5247e6167e96013eae74bea4c5949c550809970a9e565c", size = 548120 },
+]
+
+[[package]]
+name = "langchain-ollama"
+version = "1.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "langchain-core" },
+    { name = "ollama" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d4/9b/6641afe8a5bf807e454fd464eddfc7eb2f2df53cb0b29744381171f9c609/langchain_ollama-1.1.0.tar.gz", hash = "sha256:f776f56f6782ae4da7692579b94a6575906118318d1023b455d7207f9d059811", size = 133075 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2c/b2/c2acb076590a98bee2816ed5f285e00df162a34238f9e276e175e14ebc35/langchain_ollama-1.1.0-py3-none-any.whl", hash = "sha256:43ac83a6eacb0f43855810739794dd55019e0d9b17bdcf3ecb3b1991ac3b59dd", size = 31413 },
 ]
 
 [[package]]
@@ -3365,15 +3384,15 @@ wheels = [
 
 [[package]]
 name = "ollama"
-version = "0.5.3"
+version = "0.6.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/91/6d/ae96027416dcc2e98c944c050c492789502d7d7c0b95a740f0bb39268632/ollama-0.5.3.tar.gz", hash = "sha256:40b6dff729df3b24e56d4042fd9d37e231cee8e528677e0d085413a1d6692394", size = 43331 }
+sdist = { url = "https://files.pythonhosted.org/packages/fc/72/5f12423b6b39ca8430fbe56f77fcf4ef60f63067c7c4a2e30e200ed9ec16/ollama-0.6.2.tar.gz", hash = "sha256:936d55daa684f474364c098611c933626f8d6c7d67065c5b7ae0c477b508b07f", size = 53145 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/be/f6/2091e50b8b6c3e6901f6eab283d5efd66fb71c86ddb1b4d68766c3eeba0f/ollama-0.5.3-py3-none-any.whl", hash = "sha256:a8303b413d99a9043dbf77ebf11ced672396b59bec27e6d5db67c88f01b279d2", size = 13490 },
+    { url = "https://files.pythonhosted.org/packages/c4/ab/d6722beeb2d10f7a3b9ff49375708904fde18f82b5609a0bc4aeb5996a4d/ollama-0.6.2-py3-none-any.whl", hash = "sha256:3ad7daab28e5a973445c36a73882a3ef698c2ebb00e21e308652741577509f7d", size = 15115 },
 ]
 
 [[package]]

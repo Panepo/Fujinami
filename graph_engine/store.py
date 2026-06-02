@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,16 @@ import pyarrow as pa
 from graph_engine.models import Triple
 
 logger = logging.getLogger(__name__)
+
+
+def normalize_name(text: str) -> str:
+    """Normalize an entity name for consistent storage and lookup.
+
+    Strips leading/trailing whitespace and collapses internal runs of
+    whitespace to a single space. Case is preserved so stored names remain
+    readable; callers should use ``LOWER()`` for case-insensitive comparison.
+    """
+    return re.sub(r"\s+", " ", text.strip())
 
 # ---------------------------------------------------------------------------
 # LanceDB schema for triples
@@ -198,15 +209,19 @@ class LanceDBGraphStore(GraphStore):
         if source_doc:
             filters.append(f"source_doc = '{source_doc.replace(chr(39), chr(39)*2)}'")
         if subject_name:
-            filters.append(f"subject_name = '{subject_name.replace(chr(39), chr(39)*2)}'")
+            safe = normalize_name(subject_name).replace(chr(39), chr(39) * 2)
+            filters.append(f"LOWER(subject_name) LIKE '%{safe.lower()}%'")
         if subject_type:
-            filters.append(f"subject_type = '{subject_type.replace(chr(39), chr(39)*2)}'")
+            safe = subject_type.replace(chr(39), chr(39) * 2)
+            filters.append(f"LOWER(subject_type) = LOWER('{safe}')")
         if predicate:
-            filters.append(f"predicate = '{predicate.replace(chr(39), chr(39)*2)}'")
+            safe = predicate.replace(chr(39), chr(39) * 2)
+            filters.append(f"LOWER(predicate) = LOWER('{safe}')")
         if method:
             filters.append(f"method = '{method.replace(chr(39), chr(39)*2)}'")
         if object_name:
-            filters.append(f"object_name = '{object_name.replace(chr(39), chr(39)*2)}'")
+            safe = normalize_name(object_name).replace(chr(39), chr(39) * 2)
+            filters.append(f"LOWER(object_name) LIKE '%{safe.lower()}%'")
 
         query = self._table.search()
         if filters:
@@ -219,6 +234,24 @@ class LanceDBGraphStore(GraphStore):
         if self._table is None:
             return 0
         return self._table.count_rows()
+
+    def get_all_entity_names(self) -> list[str]:
+        """Return all unique entity names (subjects + objects) stored in the graph.
+
+        Used by embedding-based entity lookup to find the closest stored
+        entities when keyword search yields no results.
+        """
+        if self._table is None:
+            return []
+        try:
+            import pandas as pd  # noqa: PLC0415
+            df = self._table.to_pandas()
+            subjects: list[str] = df["subject_name"].dropna().unique().tolist()
+            objects: list[str] = df["object_name"].dropna().unique().tolist()
+            return list(dict.fromkeys(subjects + objects))  # preserves order, deduplicates
+        except Exception as exc:
+            logger.debug("get_all_entity_names failed: %s", exc)
+            return []
 
     # ------------------------------------------------------------------
     # Helpers
@@ -237,11 +270,11 @@ class LanceDBGraphStore(GraphStore):
             "source_doc": t.source_doc,
             "method": t.method,
             "subject_id": t.subject.id,
-            "subject_name": t.subject.name,
+            "subject_name": normalize_name(t.subject.name),
             "subject_type": t.subject.type,
             "predicate": t.predicate,
             "object_id": t.object.id,
-            "object_name": t.object.name,
+            "object_name": normalize_name(t.object.name),
             "object_type": t.object.type,
             "weight": float(t.weight),
             "subject_specs": json.dumps(t.subject.specs),
