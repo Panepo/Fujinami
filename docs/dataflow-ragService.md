@@ -1,4 +1,4 @@
-# Data Flow: RAG Service — Semantic Kernel + Local graph_engine
+# Data Flow: RAG Service — langchain-ollama + Local graph_engine
 
 ---
 
@@ -244,16 +244,21 @@ User query string
   │            Run concurrently (asyncio.gather)            │
   │                                                         │
   │  ┌───────────────────────┐  ┌─────────────────────────┐ │
-  │  │  SK Vector Search     │  │  Graph Context Search   │ │
-  │  │                       │  │                         │ │
-  │  │  query                │  │  query                  │ │
-  │  │    ──▶ embed (SK)     │  │    ──▶ spaCy NER        │ │
-  │  │    EMBEDDING_MODEL    │  │         extract entities│ │
-  │  │    OLLAMA_CHAT_URL    │  │    ──▶ LanceDBGraphStore│ │
-  │  │    ──▶ cosine sim     │  │         .get_triples()  │ │
-  │  │         LanceDB       │  │         by subject +    │ │
-  │  │    ──▶ top-k chunks   │  │         object lookup   │ │
-  │  │                       │  │    ──▶ formatted lines  │ │
+  │  │  Vector Search        │  │  Graph Context Search   │ │
+  │  │                       │  │  (_graph_context)       │ │
+  │  │  query                │  │                         │ │
+  │  │    ──▶ OllamaEmbed-   │  │  query                  │ │
+  │  │       dings.embed_    │  │    ──▶ Strategy 1:      │ │
+  │  │       query()         │  │         spaCy NER +     │ │
+  │  │    EMBEDDING_MODEL    │  │         noun-chunks     │ │
+  │  │    OLLAMA_CHAT_URL    │  │    ──▶ Strategy 2:      │ │
+  │  │    ──▶ ANN cosine     │  │         raw tokens      │ │
+  │  │         LanceDB       │  │         (fallback)      │ │
+  │  │    ──▶ top-k chunks   │  │    ──▶ Strategy 3:      │ │
+  │  │    +  title-keyword   │  │         embedding sim   │ │
+  │  │       match (merged)  │  │         (fallback)      │ │
+  │  │                       │  │    ──▶ LanceDBGraphStore│ │
+  │  │                       │  │         .get_triples()  │ │
   │  └──────────┬────────────┘  └────────────┬────────────┘ │
   └─────────────┼──────────────────────────── ┼─────────────┘
                 │  vector_context             │  graph_context
@@ -265,14 +270,14 @@ User query string
                   "Graph Search Results:\n{graph_context}"
                                │
                                ▼
-                  SK ChatHistory prompt:
-                  system: "Answer using only the provided context."
-                  user:   "Context:\n{merged}\n\nQuestion: {query}"
+                  langchain-core messages:
+                  SystemMessage: "Answer using only the provided context."
+                  HumanMessage:  "Context:\n{merged}\n\nQuestion: {query}"
                                │
                                ▼
-                  OllamaChatCompletion
+                  ChatOllama.ainvoke()
                   model: CHAT_MODEL
-                  POST {OLLAMA_CHAT_URL}/v1/chat/completions
+                  base_url: OLLAMA_CHAT_URL
                                │
                                ▼
                         final response str
@@ -286,28 +291,31 @@ User query string
 User query string
        │
        ▼
-OllamaTextEmbedding  (EMBEDDING_MODEL)
-  POST {OLLAMA_CHAT_URL}/v1/embeddings
+OllamaEmbeddings.embed_query()  (langchain-ollama)
+  model: EMBEDDING_MODEL
+  base_url: OLLAMA_CHAT_URL
        │
        ▼
   query_vector
        │
-       ▼
-LanceDB  ./ragdata/{coll}/lancedb/  table: "documents"
-  ANN search (cosine) against stored chunk vectors
-  lancedb.connect(path).open_table("documents")
-    .search(query_vector).limit(TOP_K).to_list()
+       ├─── ANN search (cosine)
+       │    LanceDB ./ragdata/{coll}/lancedb/  table: "documents"
+       │    .search(query_vector).limit(TOP_K).to_list()
+       │           │
+       │           ▼
+       │    top-k vector rows  {id, doc_id, text, vector, metadata}
+       │
+       └─── Title-keyword match  (_title_search_results)
+            Scan all rows; keep those whose section_title contains
+            any keyword from the query (len > 2, case-insensitive)
+            Merged (deduped by id) with vector results
        │
        ▼
-  top-k rows  {id, doc_id, text, vector, metadata}
+  merged rows → assembled context string
        │
        ▼
-  assembled context string
-       │
-       ▼
-SK ChatHistory prompt (system + user with context)
-OllamaChatCompletion  (CHAT_MODEL)
-  POST {OLLAMA_CHAT_URL}/v1/chat/completions
+langchain-core messages [SystemMessage, HumanMessage]
+ChatOllama.ainvoke()  (CHAT_MODEL, OLLAMA_CHAT_URL)
        │
        ▼
   final response str
@@ -321,19 +329,34 @@ OllamaChatCompletion  (CHAT_MODEL)
 User query string
        │
        ▼
-_graph_context(query)
-   spaCy NER → entity names
-   LanceDBGraphStore.get_triples(subject_name=entity)
-                                + get_triples(object_name=entity)
-   Format: "{subj} [{type}] —{pred}→ {obj} [{type}] (weight=…)"
-       │
-       ▼
+_graph_context(query)   — three cascading strategies
+   │
+   ├─ Strategy 1: spaCy NER + noun-chunk extraction
+   │    spaCy en_core_web_sm → doc.ents + doc.noun_chunks
+   │    Normalise entity names (normalize_name)
+   │    Also append raw query tokens (len > 3) — no duplicates
+   │    LanceDBGraphStore.get_triples(subject_name=entity)
+   │                     + get_triples(object_name=entity)
+   │    (LIKE-based, case-insensitive substring match)
+   │
+   ├─ Strategy 2 (fallback — only when Strategy 1 yields nothing):
+   │    Already merged via raw token append above
+   │    If no lines produced: proceed to Strategy 3
+   │
+   └─ Strategy 3 (fallback — only when Strategies 1 & 2 yield nothing):
+        store.get_all_entity_names() → list of all stored names
+        OllamaEmbeddings.embed_query(query)
+        OllamaEmbeddings.embed_documents(all_names)
+        Cosine similarity → top-5 names (threshold ≥ 0.5)
+        Fetch triples for each matched name
+   │
+   ▼
   graph_context string
+  Format per line: "{subj} [{type}] —{pred}→ {obj} [{type}] (weight=…)"
        │
        ▼
-SK ChatHistory prompt (system + user with context)
-OllamaChatCompletion  (CHAT_MODEL)
-  POST {OLLAMA_CHAT_URL}/v1/chat/completions
+langchain-core messages [SystemMessage, HumanMessage]
+ChatOllama.ainvoke()  (CHAT_MODEL, OLLAMA_CHAT_URL)
        │
        ▼
   broad entity/relationship response str
@@ -345,6 +368,8 @@ OllamaChatCompletion  (CHAT_MODEL)
 
 When the client sets `self_rag: true`, the `query_collection` endpoint bypasses the standard retrieval path entirely and delegates to `SelfReflector`. This mode is mutually exclusive with streaming (`stream: true` is ignored when `self_rag: true`).
 
+`SelfReflector` is backed by a **LangGraph `QueryGraph`** (`graph_engine/query_graph.py`) — a `StateGraph` that routes adaptively based on context quality.
+
 ```
 POST /collections/{name}/query  { self_rag: true, … }
        │
@@ -354,7 +379,37 @@ POST /collections/{name}/query  { self_rag: true, … }
        │
        ▼
  SelfReflector(rag).query(query, method, top_k)
-       │                          (see dataflow-selfReflector.md)
+       │
+       ▼
+ QueryGraph.ainvoke(QueryState)
+   │
+   ├─ method="vector" or "hybrid":
+   │    vector_retrieve_node
+   │      retriever_fn(question, top_k) → context_str, sources
+   │      Appends to node_trace
+   │    evaluate_context_node
+   │      ChatOllama: "Is the context sufficient? YES/NO"
+   │      needs_graph = reply.startswith("NO") or context empty
+   │      Appends to node_trace
+   │    ── needs_graph=True  ──► graph_retrieve_node
+   │    ── needs_graph=False ──► generate_answer_node
+   │
+   └─ method="graph":
+        graph_retrieve_node
+          graph_context_fn(question) → _graph_context() (3 strategies)
+          Appends to node_trace
+        generate_answer_node
+   │
+   ▼
+ generate_answer_node
+   Merges vector context + graph context
+   ChatOllama.ainvoke()
+   Returns final answer, iterations count
+       │
+       ▼
+ node_trace → translated to list[SelfRagStep]
+   (node name → step key/label, duration_ms → result)
+       │
        ▼
  (answer, sources, graphrag_context, SelfRagMeta)
        │
@@ -372,15 +427,19 @@ POST /collections/{name}/query  { self_rag: true, … }
 
 ### 3.5 Streaming (SSE)
 
-When the client sets `stream: true` in the query request, `api.py` returns a `StreamingResponse` with `text/event-stream` media type. Events are emitted in order:
+When the client sets `stream: true` in the query request, `api.py` returns a `StreamingResponse` with `text/event-stream` media type. Events are emitted as processing progresses:
 
-| SSE event | Payload |
-| :--- | :--- |
-| `chunks` | JSON array of retrieved `SourceChunk` objects (sent first) |
-| `graphrag` | Graph context string (hybrid/graph only) |
-| `token` | Individual LLM response tokens (streamed from Ollama) |
-| `sources` | Final JSON array of `SourceChunk` objects |
-| `done` | Empty string — signals end of stream |
+| SSE event | Payload | Notes |
+| :--- | :--- | :--- |
+| `chunks` | JSON array of retrieved `SourceChunk` objects | Emitted first, before tokens |
+| `graphrag` | Graph context string | Hybrid/graph only |
+| `node_enter` | `{node, timestamp}` | Emitted when a processing node starts |
+| `node_complete` | `{node, duration_ms}` | Emitted when a node finishes |
+| `routing_decision` | `{needs_graph: bool}` | After evaluate_context (hybrid path) |
+| `token` | Individual LLM response token string | Streamed via `ChatOllama.astream()` |
+| `sources` | Final JSON array of `SourceChunk` objects | Emitted after all tokens |
+| `done` | Empty string | Signals end of stream |
+| `error` | `{detail, type, location}` | Emitted on streaming error |
 
 ---
 
@@ -414,8 +473,11 @@ The FastAPI server exposes the following endpoints. All collection-scoped routes
 
 | Method | Path | Body | Description |
 | :--- | :--- | :--- | :--- |
-| `POST` | `/collections/{name}/index` | `{entity_types?, mode?, force?}` | Trigger async indexing; returns `task_id` immediately (HTTP 202) |
+| `POST` | `/collections/{name}/index` | `{mode?, force?}` | Trigger async indexing; returns `task_id` immediately (HTTP 202) |
 | `GET` | `/collections/{name}/index/{task_id}` | — | Poll index task status: `pending` · `running` · `done` · `error` |
+| `GET` | `/tasks` | — | List all pending/running tasks across all collections |
+| `POST` | `/collections/{name}/rebuild` | — | Rebuild LanceDB table from cached `embedded.json` files (no re-embedding); returns `task_id` (HTTP 202) |
+| `GET` | `/collections/{name}/debug/table` | — | Diagnostic: return total LanceDB row count and distinct `doc_id` list |
 
 ### Query
 
@@ -471,11 +533,11 @@ Returns `409` if `index_status == "new_docs"`.
 
 | Field | Type | Notes |
 | :--- | :--- | :--- |
-| `step` | `string` | Machine key: `retrieval_check`, `vector_search`, `graph_search`, `chunk_filter`, `generation`, `grounding_check`, `query_refinement` |
-| `label` | `string` | Human-readable label |
-| `detail` | `string` \| `null` | Extra context (query text, counts, sizes) |
-| `result` | `string` \| `null` | Outcome description |
-| `ok` | `bool` \| `null` | Pass/fail indicator (`null` = neutral) |
+| `step` | `string` | Machine key derived from `QueryGraph` node names: `vector_retrieve`, `evaluate_context`, `graph_retrieve`, `generate_answer`. Also `error` on failure. |
+| `label` | `string` | Human-readable label (node name title-cased, underscores replaced by spaces) |
+| `detail` | `string` \| `null` | Extra context (chunk counts, graph context size, evaluation decision) |
+| `result` | `string` \| `null` | Node duration in ms (e.g. `"142 ms"`) |
+| `ok` | `bool` \| `null` | `true` for completed nodes; `false` on error; `null` = neutral |
 
 ---
 
@@ -527,9 +589,11 @@ Returns `409` if `index_status == "new_docs"`.
 | VLM picture description | `DocumentLoader` (`PictureDescriptionApiOptions`) | `OLLAMA_INDEX_URL` | `POST /v1/chat/completions` | `VLM_MODEL` |
 | Chunk embedding (index) | `OllamaEmbedder.embed()` | `OLLAMA_INDEX_URL` | `POST /api/embed` | `EMBEDDING_MODEL` |
 | LLM triple extraction | `LLMExtractor` / `HybridExtractor` | `OLLAMA_INDEX_URL` | `POST /api/chat` | `EXTRACT_MODEL` |
-| Query embedding (retrieval) | `OllamaTextEmbedding` (SK) | `OLLAMA_CHAT_URL` | `POST /v1/embeddings` | `EMBEDDING_MODEL` |
-| Chat response (non-streaming) | `OllamaChatCompletion` (SK) | `OLLAMA_CHAT_URL` | `POST /v1/chat/completions` | `CHAT_MODEL` |
-| Chat response (streaming) | `OllamaChatCompletion.get_streaming_…` | `OLLAMA_CHAT_URL` | `POST /v1/chat/completions` | `CHAT_MODEL` |
+| Query embedding (retrieval) | `OllamaEmbeddings.embed_query()` (langchain-ollama) | `OLLAMA_CHAT_URL` | `POST /api/embeddings` | `EMBEDDING_MODEL` |
+| Entity embedding similarity (graph fallback) | `OllamaEmbeddings.embed_documents()` (langchain-ollama) | `OLLAMA_CHAT_URL` | `POST /api/embeddings` | `EMBEDDING_MODEL` |
+| Chat response (non-streaming) | `ChatOllama.ainvoke()` (langchain-ollama) | `OLLAMA_CHAT_URL` | `POST /api/chat` | `CHAT_MODEL` |
+| Chat response (streaming) | `ChatOllama.astream()` (langchain-ollama) | `OLLAMA_CHAT_URL` | `POST /api/chat` | `CHAT_MODEL` |
+| Context evaluation (Self-RAG) | `ChatOllama.ainvoke()` (QueryGraph evaluate_context_node) | `OLLAMA_CHAT_URL` | `POST /api/chat` | `CHAT_MODEL` |
 
 Key environment variables:
 
