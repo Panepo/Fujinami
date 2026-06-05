@@ -217,6 +217,14 @@ class RagRetriever:
         vector_results = self._table.search(vector).limit(top_k).to_list()
         return vector_results
 
+    async def _raw_vector_results_from_embedding(
+        self, embedding: list[float], top_k: int = _TOP_K
+    ) -> list[dict]:
+        """Return raw LanceDB rows using a pre-computed *embedding* vector (e.g. from HyDE)."""
+        if not self._ensure_table():
+            return []
+        return self._table.search(embedding).limit(top_k).to_list()
+
     def _graph_context(self, query: str) -> str:
         """
         Build graph context for *query* using three cascading strategies:

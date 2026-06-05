@@ -123,6 +123,13 @@ class RagService:
         kwargs: dict = {} if top_k is None else {"top_k": top_k}
         return await self._retriever._raw_vector_results(query, **kwargs)
 
+    async def _raw_vector_results_from_embedding(
+        self, embedding: list[float], top_k: int | None = None
+    ) -> list[dict]:
+        """Return raw LanceDB rows for a pre-computed *embedding*. Delegates to :class:`RagRetriever`."""
+        kwargs: dict = {} if top_k is None else {"top_k": top_k}
+        return await self._retriever._raw_vector_results_from_embedding(embedding, **kwargs)
+
     async def _raw_vector_context(self, query: str, top_k: int | None = None) -> str:
         """Return concatenated text chunks for *query*. Delegates to :class:`RagRetriever`."""
         kwargs: dict = {} if top_k is None else {"top_k": top_k}

@@ -47,12 +47,20 @@ class IndexStatusResponse(BaseModel):
     detail: str | None = None
 
 
+class RewriteMeta(BaseModel):
+    mode: str
+    original_query: str
+    rewritten_queries: list[str]
+    hypothetical_document: str | None = None
+
+
 class QueryRequest(BaseModel):
     query: str
     method: Literal["vector", "graph", "hybrid"] = "hybrid"
     top_k: int = 5
     stream: bool = False
     self_rag: bool = False
+    rewrite: Literal["hyde", "multi_query", "step_back"] | None = None
 
 
 class SourceChunk(BaseModel):
@@ -85,6 +93,7 @@ class QueryResponse(BaseModel):
     sources: list[SourceChunk] | None = None
     graphrag_context: str | None = None
     self_rag_meta: Optional[SelfRagMeta] = None
+    rewrite_meta: Optional[RewriteMeta] = None
 
 
 class DocumentChunk(BaseModel):

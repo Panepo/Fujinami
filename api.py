@@ -42,6 +42,7 @@ from models import (
     IndexStatusResponse,
     QueryRequest,
     QueryResponse,
+    RewriteMeta,
     SourceChunk,
 )
 from rag_service import SUPPORTED_EXTENSIONS, RagService
@@ -489,10 +490,11 @@ async def _stream_answer(
     sources: list[SourceChunk] | None,
     vector_context: str | None = None,
     graphrag_context: str | None = None,
+    rewrite_meta: RewriteMeta | None = None,
 ) -> AsyncGenerator[str, None]:
     """Yield SSE events: chunks (optional), graphrag (optional), token*, sources (optional), done."""
     try:
-        async for event in _stream_answer_inner(rag, query_req, sources, vector_context, graphrag_context):
+        async for event in _stream_answer_inner(rag, query_req, sources, vector_context, graphrag_context, rewrite_meta):
             yield event
     except Exception as exc:  # noqa: BLE001
         tb = traceback.extract_tb(exc.__traceback__)
@@ -517,9 +519,14 @@ async def _stream_answer_inner(
     sources: list[SourceChunk] | None,
     vector_context: str | None = None,
     graphrag_context: str | None = None,
+    rewrite_meta: RewriteMeta | None = None,
 ) -> AsyncGenerator[str, None]:
     import time  # noqa: PLC0415
     from langchain_core.messages import HumanMessage, SystemMessage  # noqa: PLC0415
+
+    # Emit rewrite metadata before context so the UI can display it immediately
+    if rewrite_meta is not None:
+        yield f"event: rewrite_meta\ndata: {json.dumps(rewrite_meta.model_dump())}\n\n"
 
     # Emit retrieved context before tokens so the UI can display it immediately
     if sources is not None:
@@ -608,7 +615,21 @@ async def query_collection(name: str, body: QueryRequest):
             ),
         )
 
-    # Self-RAG path — takes precedence over streaming when both flags are set
+    sources: list[SourceChunk] | None = None
+    vector_context: str | None = None
+    graphrag_context: str | None = None
+    rewrite_meta: RewriteMeta | None = None
+    _rewrite_queries: list[str] | None = None
+    _hyde_embedding: list[float] | None = None
+
+    # Step 1 — Compute rewrite metadata (always, so it can be returned in every path)
+    if body.rewrite and body.method != "graph":
+        from rewriter import QueryRewriter  # noqa: PLC0415
+
+        rewriter = QueryRewriter(rag._chat_service, rag._retriever._query_embedding_service)
+        _rewrite_queries, _hyde_embedding, rewrite_meta = await rewriter.rewrite(body.query, body.rewrite)
+
+    # Step 2 — Self-RAG path (includes rewrite_meta for display)
     if body.self_rag:
         from self_reflector import SelfReflector  # noqa: PLC0415
 
@@ -623,14 +644,51 @@ async def query_collection(name: str, body: QueryRequest):
             sources=sources,
             graphrag_context=graphrag_context,
             self_rag_meta=self_rag_meta,
+            rewrite_meta=rewrite_meta,
         )
 
-    sources: list[SourceChunk] | None = None
-    vector_context: str | None = None
-    graphrag_context: str | None = None
+    # Step 3 — Regular retrieval (using rewrite results when available)
+    if body.rewrite and body.method != "graph":
+        if body.rewrite == "hyde" and _hyde_embedding is not None:
+            # HyDE: use the hypothetical document embedding for retrieval
+            raw_rows = await rag._raw_vector_results_from_embedding(_hyde_embedding, body.top_k)
+        else:
+            # multi_query / step_back: parallel searches then deduplicate
+            assert _rewrite_queries is not None
+            all_results = await asyncio.gather(
+                *[rag._raw_vector_results(q, body.top_k) for q in _rewrite_queries]
+            )
+            seen_keys: set[tuple] = set()
+            raw_rows = []
+            for batch in all_results:
+                for row in batch:
+                    try:
+                        meta_dict = json.loads(row.get("metadata", "{}"))
+                    except (json.JSONDecodeError, TypeError):
+                        meta_dict = {}
+                    key = (row.get("doc_id", ""), meta_dict.get("chunk_index", 0))
+                    if key not in seen_keys:
+                        seen_keys.add(key)
+                        raw_rows.append(row)
 
-    # Fetch vector chunks for non-graph methods
-    if body.method != "graph":
+        vector_context = "\n\n".join(r.get("text", "") for r in raw_rows)
+        sources = []
+        for row in raw_rows:
+            try:
+                meta_dict = json.loads(row.get("metadata", "{}"))
+            except (json.JSONDecodeError, TypeError):
+                meta_dict = {}
+            sources.append(
+                SourceChunk(
+                    doc_id=row.get("doc_id", ""),
+                    chunk_index=meta_dict.get("chunk_index", 0),
+                    excerpt=row.get("text", "")[:200],
+                    full_text=row.get("text", ""),
+                )
+            )
+
+    # Fetch vector chunks for non-graph methods (when rewrite is not active)
+    elif body.method != "graph":
         raw_rows = await rag._raw_vector_results(body.query, body.top_k)
         vector_context = "\n\n".join(r.get("text", "") for r in raw_rows)
         sources = []
@@ -656,7 +714,7 @@ async def query_collection(name: str, body: QueryRequest):
 
     if body.stream:
         return StreamingResponse(
-            _stream_answer(rag, body, sources, vector_context, graphrag_context),
+            _stream_answer(rag, body, sources, vector_context, graphrag_context, rewrite_meta),
             media_type="text/event-stream",
         )
 
@@ -680,6 +738,7 @@ async def query_collection(name: str, body: QueryRequest):
         answer=answer,
         sources=sources,
         graphrag_context=graphrag_context,
+        rewrite_meta=rewrite_meta,
     )
 
 
