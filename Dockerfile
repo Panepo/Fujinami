@@ -9,9 +9,9 @@ WORKDIR /build
 
 # System libraries required by spaCy (build tools for wheel compilation) and lancedb
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential \
-        libglib2.0-0 \
-    && rm -rf /var/lib/apt/lists/*
+  build-essential \
+  libglib2.0-0 \
+  && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 
@@ -19,7 +19,7 @@ RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 # Download the bundled spaCy model used by graph_engine extractors and retriever
 RUN PYTHONPATH=/install/lib/python3.12/site-packages \
-    python -m spacy download en_core_web_sm
+  python -m spacy download en_core_web_sm
 
 # ---------------------------------------------------------------------------
 # Runtime stage
@@ -30,14 +30,14 @@ WORKDIR /app
 
 # Runtime system libraries
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libglib2.0-0 \
-    && rm -rf /var/lib/apt/lists/*
+  libglib2.0-0 \
+  && rm -rf /var/lib/apt/lists/*
 
 # Copy installed packages + spaCy model from builder
 COPY --from=builder /install /usr/local
 
 # Copy application source
-COPY api.py models.py ragService.py retriever.py document_loader.py __init__.py ./
+COPY api.py models.py rag_service.py retriever.py document_loader.py self_reflector.py __init__.py ./
 COPY indexer/ ./indexer/
 COPY graph_engine/ ./graph_engine/
 COPY static/ ./static/
@@ -47,19 +47,19 @@ VOLUME ["/app/data", "/app/ragdata"]
 
 # Environment variable defaults (override at runtime via --env or compose env_file)
 ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    DOCLING_URL=http://docling-serve:5001 \
-    OLLAMA_INDEX_URL=http://host.docker.internal:11434 \
-    OLLAMA_CHAT_URL=http://host.docker.internal:11434 \
-    CHAT_MODEL=gemma4:e2b \
-    EMBEDDING_MODEL=embeddinggemma:300m \
-    VLM_MODEL=gemma4:e4b \
-    VLM_TIMEOUT=180 \
-    EXTRACT_MODEL=granite4.1:8b \
-    GRAPH_EXTRACTOR=hybrid \
-    GRAPH_CHUNK_SIZE=400 \
-    GRAPH_CHUNK_OVERLAP=80 \
-    TOP_K=5
+  PYTHONDONTWRITEBYTECODE=1 \
+  DOCLING_URL=http://docling-serve:5001 \
+  OLLAMA_INDEX_URL=http://host.docker.internal:11434 \
+  OLLAMA_CHAT_URL=http://host.docker.internal:11434 \
+  CHAT_MODEL=gemma4:e2b \
+  EMBEDDING_MODEL=embeddinggemma:300m \
+  VLM_MODEL=gemma4:e4b \
+  VLM_TIMEOUT=180 \
+  EXTRACT_MODEL=granite4.1:8b \
+  GRAPH_EXTRACTOR=hybrid \
+  GRAPH_CHUNK_SIZE=400 \
+  GRAPH_CHUNK_OVERLAP=80 \
+  TOP_K=5
 
 EXPOSE 8000
 
