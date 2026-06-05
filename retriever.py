@@ -4,6 +4,8 @@ RagRetriever — vector search, graph-context search, and response generation.
 Replaces the retrieval logic from the monolithic RagService.
 Graph context is served by graph_engine.store.LanceDBGraphStore (local triples),
 replacing the Microsoft GraphRAG CLI subprocess.
+
+LLM stack: langchain-ollama (ChatOllama + OllamaEmbeddings).
 """
 from __future__ import annotations
 
@@ -31,6 +33,17 @@ _EMBEDDING_MODEL = os.environ["EMBEDDING_MODEL"]
 _TOP_K = int(os.environ.get("TOP_K", "5"))
 
 _TABLE_NAME = "documents"
+
+
+def _format_triple(triple: dict) -> str:
+    """Format a graph triple dict as a human-readable context line."""
+    subj = triple.get("subject", {}).get("name", "")
+    subj_t = triple.get("subject", {}).get("type", "")
+    pred = triple.get("predicate", "")
+    obj = triple.get("object", {}).get("name", "")
+    obj_t = triple.get("object", {}).get("type", "")
+    w = triple.get("weight", 1.0)
+    return f"{subj} [{subj_t}] —{pred}→ {obj} [{obj_t}] (weight={w:.2f})"
 
 
 class RagRetriever:
@@ -66,29 +79,18 @@ class RagRetriever:
         )
         self._lance_path = lance_path
 
-        # --- Semantic Kernel setup ---
-        from semantic_kernel import Kernel
-        from semantic_kernel.connectors.ai.ollama import (
-            OllamaChatCompletion,
-            OllamaTextEmbedding,
-        )
+        # --- langchain-ollama setup ---
+        from langchain_ollama import ChatOllama, OllamaEmbeddings  # noqa: PLC0415
 
-        self._kernel = Kernel()
-
-        self._chat_service = OllamaChatCompletion(
-            ai_model_id=_CHAT_MODEL,
-            host=_OLLAMA_CHAT_URL,
-            service_id="chat",
+        self._chat_service = ChatOllama(
+            model=_CHAT_MODEL,
+            base_url=_OLLAMA_CHAT_URL,
         )
         # Query-time embeddings come from the chat server (local, fast)
-        self._query_embedding_service = OllamaTextEmbedding(
-            ai_model_id=_EMBEDDING_MODEL,
-            host=_OLLAMA_CHAT_URL,
-            service_id="query_embedding",
+        self._query_embedding_service = OllamaEmbeddings(
+            model=_EMBEDDING_MODEL,
+            base_url=_OLLAMA_CHAT_URL,
         )
-
-        self._kernel.add_service(self._chat_service)
-        self._kernel.add_service(self._query_embedding_service)
 
         # --- LanceDB setup ---
         import lancedb  # noqa: PLC0415
@@ -108,10 +110,7 @@ class RagRetriever:
     # ------------------------------------------------------------------
 
     def _ensure_table(self) -> bool:
-        """Open the LanceDB table if it was created after this retriever was initialised.
-
-        Returns ``True`` if the table is (now) available, ``False`` otherwise.
-        """
+        """Open the LanceDB table if it was created after this retriever was initialised."""
         if self._table is not None:
             return True
         if _TABLE_NAME in self._db.table_names():
@@ -121,11 +120,7 @@ class RagRetriever:
         return False
 
     def reload_table(self) -> None:
-        """Reopen the LanceDB table reference so newly indexed rows are visible.
-
-        Call this after :meth:`RagIndexer.index_documents` completes to ensure
-        subsequent searches see the latest data without a server restart.
-        """
+        """Reopen the LanceDB table reference so newly indexed rows are visible."""
         if _TABLE_NAME in self._db.table_names():
             self._table = self._db.open_table(_TABLE_NAME)
             logger.info("Reloaded LanceDB table '%s'", _TABLE_NAME)
@@ -152,9 +147,7 @@ class RagRetriever:
         return await self._generate_response(query, graph_ctx)
 
     async def hybrid_search(self, query: str, top_k: int = _TOP_K) -> str:
-        """
-        Parallel vector + graph search, merged context, SK-generated response.
-        """
+        """Parallel vector + graph search, merged context, LLM-generated response."""
         vector_task = asyncio.create_task(self._raw_vector_context(query, top_k))
         graph_task = asyncio.create_task(asyncio.to_thread(self._graph_context, query))
 
@@ -217,61 +210,35 @@ class RagRetriever:
         """Return raw LanceDB rows for *query*, merging vector and title-match results."""
         if not self._ensure_table():
             return []
-        query_emb = await self._query_embedding_service.generate_embeddings([query])
-        vector = (
-            query_emb[0].tolist()
-            if hasattr(query_emb[0], "tolist")
-            else list(query_emb[0])
+        # OllamaEmbeddings.embed_query() returns list[float] directly — no adapter needed
+        vector = await asyncio.to_thread(
+            self._query_embedding_service.embed_query, query
         )
         vector_results = self._table.search(vector).limit(top_k).to_list()
-        title_results = self._title_search_results(query)
-        seen_ids: set[str] = {r["id"] for r in vector_results}
-        for row in title_results:
-            if row.get("id") not in seen_ids:
-                vector_results.append(row)
-                seen_ids.add(row.get("id"))
         return vector_results
-
-    def _title_search_results(self, query: str) -> list[dict]:
-        """Return LanceDB rows whose ``section_title`` contains any keyword from *query*."""
-        if not self._ensure_table():
-            return []
-        try:
-            keywords = [w.lower() for w in query.split() if len(w) > 2]
-            if not keywords:
-                return []
-            df = self._table.to_pandas()
-
-            def _title_matches(metadata_str: str) -> bool:
-                try:
-                    meta = json.loads(metadata_str)
-                    title = (meta.get("section_title") or "").lower()
-                    return any(kw in title for kw in keywords)
-                except (json.JSONDecodeError, TypeError):
-                    return False
-
-            mask = df["metadata"].apply(_title_matches)
-            matched = df[mask]
-            logger.debug("Title search found %d rows for query '%s'", len(matched), query)
-            return matched.to_dict(orient="records")
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("Title search failed: %s", exc)
-            return []
 
     def _graph_context(self, query: str) -> str:
         """
-        Use spaCy NER to extract entities from *query*, look up their graph triples
-        from LanceDBGraphStore, and format them for context injection.
+        Build graph context for *query* using three cascading strategies:
+
+        1. spaCy NER / noun-chunk extraction → LIKE-based triple lookup
+           (normalized, case-insensitive, substring match).
+        2. Raw query tokens → LIKE-based lookup (fallback when NER finds nothing).
+        3. Embedding similarity → find stored entity names closest to the query
+           and fetch their triples (fallback when strategies 1 & 2 yield nothing).
 
         Format per triple:
             {subject} [{subject_type}] —{predicate}→ {object} [{object_type}] (weight={w:.2f})
         """
         try:
-            from graph_engine.store import LanceDBGraphStore
+            from graph_engine.store import LanceDBGraphStore, normalize_name  # noqa: PLC0415
         except ImportError:
             logger.debug("graph_engine not available, skipping graph context")
             return ""
 
+        # ------------------------------------------------------------------
+        # Entity extraction
+        # ------------------------------------------------------------------
         try:
             import spacy  # noqa: PLC0415
             _spacy_model = "en_core_web_sm"
@@ -279,17 +246,26 @@ class RagRetriever:
             nlp = spacy.load(_local_model if _local_model.exists() else _spacy_model)
         except Exception as exc:
             logger.debug("spaCy NER not available: %s", exc)
-            # Fallback: use the raw query words as entity hints
-            entities: list[str] = [w for w in query.split() if len(w) > 3]
+            entities: list[str] = [
+                normalize_name(w) for w in query.split() if len(w) > 3
+            ]
         else:
             doc = nlp(query)
-            entities = [ent.text for ent in doc.ents]
+            entities = [normalize_name(ent.text) for ent in doc.ents]
             if not entities:
-                # Use noun chunks as fallback entity hints
-                entities = [chunk.text for chunk in doc.noun_chunks if len(chunk.text) > 3]
-
-        if not entities:
-            return ""
+                entities = [
+                    normalize_name(chunk.text)
+                    for chunk in doc.noun_chunks
+                    if len(chunk.text) > 3
+                ]
+            # Strategy 2 fallback: also include raw tokens so short queries still hit
+            token_entities = [normalize_name(w) for w in query.split() if len(w) > 3]
+            # Merge, preserving order, no duplicates
+            seen_ents: set[str] = set(entities)
+            for tok in token_entities:
+                if tok not in seen_ents:
+                    entities.append(tok)
+                    seen_ents.add(tok)
 
         try:
             store = LanceDBGraphStore(self._lance_path)
@@ -300,8 +276,12 @@ class RagRetriever:
         lines: list[str] = []
         seen: set[str] = set()
 
+        # ------------------------------------------------------------------
+        # Strategy 1 & 2: LIKE-based lookup for every extracted entity
+        # ------------------------------------------------------------------
         for entity in entities:
-            # Search by subject AND object to catch all relevant triples
+            if not entity:
+                continue
             try:
                 candidate_triples = (
                     store.get_triples(subject_name=entity)
@@ -315,35 +295,62 @@ class RagRetriever:
                 if key in seen:
                     continue
                 seen.add(key)
-                # get_triples returns nested dicts via _row_to_dict: triple["subject"]["name"]
-                subj = triple.get("subject", {}).get("name", "")
-                subj_t = triple.get("subject", {}).get("type", "")
-                pred = triple.get("predicate", "")
-                obj = triple.get("object", {}).get("name", "")
-                obj_t = triple.get("object", {}).get("type", "")
-                w = triple.get("weight", 1.0)
-                lines.append(
-                    f"{subj} [{subj_t}] —{pred}→ {obj} [{obj_t}] (weight={w:.2f})"
-                )
+                lines.append(_format_triple(triple))
+
+        # ------------------------------------------------------------------
+        # Strategy 3: embedding-based entity lookup (only when LIKE found nothing)
+        # ------------------------------------------------------------------
+        if not lines:
+            try:
+                all_names = store.get_all_entity_names()
+                if all_names:
+                    import numpy as np  # noqa: PLC0415
+
+                    q_vec = self._query_embedding_service.embed_query(query)
+                    e_vecs = self._query_embedding_service.embed_documents(all_names)
+                    q_arr = np.array(q_vec, dtype=float)
+                    e_arr = np.array(e_vecs, dtype=float)
+                    norms = np.linalg.norm(e_arr, axis=1) * np.linalg.norm(q_arr) + 1e-9
+                    sims = (e_arr @ q_arr) / norms
+                    top_idxs = np.argsort(sims)[::-1][:5]
+                    for idx in top_idxs:
+                        if float(sims[idx]) < 0.5:
+                            break
+                        matched = all_names[int(idx)]
+                        logger.debug(
+                            "Embedding entity match: '%s' (sim=%.3f)", matched, sims[idx]
+                        )
+                        for triple in (
+                            store.get_triples(subject_name=matched)
+                            + store.get_triples(object_name=matched)
+                        ):
+                            key = triple.get("triple_id", "")
+                            if key in seen:
+                                continue
+                            seen.add(key)
+                            lines.append(_format_triple(triple))
+            except Exception as exc:
+                logger.debug("Embedding-based entity lookup failed: %s", exc)
 
         return "\n".join(lines)
 
     async def _generate_response(self, query: str, context: str) -> str:
-        """Generate a final answer via the SK chat service given *context*."""
-        from semantic_kernel.contents import ChatHistory  # noqa: PLC0415
-        from semantic_kernel.connectors.ai.prompt_execution_settings import (
-            PromptExecutionSettings,
-        )
+        """Generate a final answer via ChatOllama given *context*."""
+        from langchain_core.messages import HumanMessage, SystemMessage  # noqa: PLC0415
 
-        history = ChatHistory()
-        history.add_system_message(
-            "You are a helpful assistant. Answer the user's question using only "
-            "the provided context. If the context does not contain enough information, "
-            "say so."
-        )
-        history.add_user_message(f"Context:\n{context}\n\nQuestion: {query}")
-        settings = PromptExecutionSettings()
-        responses = await self._chat_service.get_chat_message_contents(
-            history, settings=settings
-        )
-        return str(responses[0]) if responses else ""
+        messages = [
+            SystemMessage(content=(
+                "You are a helpful assistant. Answer the user's question using only "
+                "the provided context. If the context does not contain enough information, "
+                "say so."
+            )),
+            HumanMessage(content=f"Context:\n{context}\n\nQuestion: {query}"),
+        ]
+        try:
+            response = await self._chat_service.ainvoke(messages)
+            return response.content or ""
+        except Exception as exc:
+            logger.warning("_generate_response error: %s", exc)
+            return ""
+
+

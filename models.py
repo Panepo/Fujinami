@@ -29,21 +29,7 @@ class DocumentInfo(BaseModel):
     size_bytes: int
 
 
-ALL_ENTITY_TYPES = [
-    "organization",
-    "person",
-    "geo",
-    "event",
-    "concept",
-    "technology",
-    "product",
-    "process",
-    "system",
-]
-
-
 class IndexRequest(BaseModel):
-    entity_types: list[str] | None = None
     mode: Literal["vector", "graph", "all"] = "all"
     force: bool = False
 

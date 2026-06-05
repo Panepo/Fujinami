@@ -384,10 +384,10 @@ async def debug_table(name: str) -> JSONResponse:
 # ---------------------------------------------------------------------------
 
 
-async def _run_index(task_id: str, rag: RagService, entity_types: list[str] | None = None, mode: str = "all", force: bool = False) -> None:
+async def _run_index(task_id: str, rag: RagService, mode: str = "all", force: bool = False) -> None:
     _tasks[task_id].status = "running"
     try:
-        await rag.index_documents(entity_types=entity_types, mode=mode, force=force)
+        await rag.index_documents(mode=mode, force=force)
         _tasks[task_id].status = "done"
     except Exception as exc:  # noqa: BLE001
         tb = traceback.extract_tb(exc.__traceback__)
@@ -415,12 +415,11 @@ async def trigger_index(
     body: IndexRequest | None = None,
 ) -> IndexResponse:
     rag = _get_service(name)
-    entity_types = (body.entity_types if body else None) or None
     mode = (body.mode if body else None) or "all"
     force = (body.force if body else False)
     task_id = str(uuid.uuid4())
     _tasks[task_id] = IndexStatusResponse(task_id=task_id, collection=name, status="pending")
-    background_tasks.add_task(_run_index, task_id, rag, entity_types, mode, force)
+    background_tasks.add_task(_run_index, task_id, rag, mode, force)
     return IndexResponse(collection=name, status="pending", task_id=task_id)
 
 
@@ -519,7 +518,8 @@ async def _stream_answer_inner(
     vector_context: str | None = None,
     graphrag_context: str | None = None,
 ) -> AsyncGenerator[str, None]:
-    from semantic_kernel.contents import ChatHistory  # noqa: PLC0415
+    import time  # noqa: PLC0415
+    from langchain_core.messages import HumanMessage, SystemMessage  # noqa: PLC0415
 
     # Emit retrieved context before tokens so the UI can display it immediately
     if sources is not None:
@@ -529,43 +529,64 @@ async def _stream_answer_inner(
         yield f"event: graphrag\ndata: {json.dumps(graphrag_context)}\n\n"
 
     if query_req.method == "graph":
-        # GraphRAG global result IS the answer
+        # Graph-only: emit node flow events + answer
+        t0 = time.time()
+        yield f"event: node_enter\ndata: {json.dumps({'node': 'graph_retrieve', 'timestamp': t0})}\n\n"
         answer = graphrag_context or await rag.global_search(query_req.query)
+        yield f"event: node_complete\ndata: {json.dumps({'node': 'graph_retrieve', 'duration_ms': int((time.time()-t0)*1000)})}\n\n"
+        yield f"event: routing_decision\ndata: {json.dumps({'needs_graph': True})}\n\n"
+
+        t1 = time.time()
+        yield f"event: node_enter\ndata: {json.dumps({'node': 'generate_answer', 'timestamp': t1})}\n\n"
         yield f"event: token\ndata: {json.dumps(answer)}\n\n"
+        yield f"event: node_complete\ndata: {json.dumps({'node': 'generate_answer', 'duration_ms': int((time.time()-t1)*1000)})}\n\n"
     else:
-        # Build context from pre-fetched results, falling back to fresh fetch if needed
+        # Vector-first path
+        t_vr = time.time()
+        yield f"event: node_enter\ndata: {json.dumps({'node': 'vector_retrieve', 'timestamp': t_vr})}\n\n"
         if vector_context is None:
             vector_context = await rag._raw_vector_context(query_req.query, query_req.top_k)
+        yield f"event: node_complete\ndata: {json.dumps({'node': 'vector_retrieve', 'duration_ms': int((time.time()-t_vr)*1000)})}\n\n"
 
-        if query_req.method == "hybrid":
+        # Evaluate context
+        t_ev = time.time()
+        yield f"event: node_enter\ndata: {json.dumps({'node': 'evaluate_context', 'timestamp': t_ev})}\n\n"
+        needs_graph = query_req.method == "hybrid"
+        yield f"event: node_complete\ndata: {json.dumps({'node': 'evaluate_context', 'duration_ms': int((time.time()-t_ev)*1000)})}\n\n"
+        yield f"event: routing_decision\ndata: {json.dumps({'needs_graph': needs_graph})}\n\n"
+
+        context = vector_context or ""
+        if needs_graph:
+            t_gr = time.time()
+            yield f"event: node_enter\ndata: {json.dumps({'node': 'graph_retrieve', 'timestamp': t_gr})}\n\n"
             if graphrag_context is None:
-                graphrag_context = await rag._graphrag_search(query_req.query, method="local")
+                graphrag_context = await asyncio.to_thread(rag._retriever._graph_context, query_req.query)
+            yield f"event: node_complete\ndata: {json.dumps({'node': 'graph_retrieve', 'duration_ms': int((time.time()-t_gr)*1000)})}\n\n"
             parts_ctx: list[str] = []
             if vector_context:
                 parts_ctx.append(f"Vector Search Results:\n{vector_context}")
             if graphrag_context:
                 parts_ctx.append(f"Graph Search Results:\n{graphrag_context}")
             context = "\n\n".join(parts_ctx)
-        else:
-            context = vector_context or ""
 
-        history = ChatHistory()
-        history.add_system_message(
-            "You are a helpful assistant. Answer the user's question using only "
-            "the provided context. If the context does not contain enough information, say so."
-        )
-        history.add_user_message(f"Context:\n{context}\n\nQuestion: {query_req.query}")
+        # Generate answer with token streaming
+        t_ga = time.time()
+        yield f"event: node_enter\ndata: {json.dumps({'node': 'generate_answer', 'timestamp': t_ga})}\n\n"
 
-        from semantic_kernel.connectors.ai.ollama import (  # noqa: PLC0415
-            OllamaChatPromptExecutionSettings,
-        )
+        messages = [
+            SystemMessage(content=(
+                "You are a helpful assistant. Answer the user's question using only "
+                "the provided context. If the context does not contain enough information, say so."
+            )),
+            HumanMessage(content=f"Context:\n{context}\n\nQuestion: {query_req.query}"),
+        ]
 
-        async for chunk in rag._chat_service.get_streaming_chat_message_contents(
-            history, OllamaChatPromptExecutionSettings()
-        ):
-            text = str(chunk[0]) if chunk else ""
+        async for chunk in rag._chat_service.astream(messages):
+            text = chunk.content if hasattr(chunk, "content") else str(chunk)
             if text:
                 yield f"event: token\ndata: {json.dumps(text)}\n\n"
+
+        yield f"event: node_complete\ndata: {json.dumps({'node': 'generate_answer', 'duration_ms': int((time.time()-t_ga)*1000)})}\n\n"
 
     if sources is not None:
         sources_data = json.dumps([s.model_dump() for s in sources])

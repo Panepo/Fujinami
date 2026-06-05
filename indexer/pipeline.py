@@ -106,7 +106,6 @@ class RagIndexer:
     async def index_documents(
         self,
         documents_dir: str | Path | None = None,
-        entity_types: list[str] | None = None,
         mode: str = "all",
         force: bool = False,
     ) -> None:

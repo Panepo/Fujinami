@@ -79,14 +79,12 @@ class RagService:
     async def index_documents(
         self,
         documents_dir: str | Path | None = None,
-        entity_types: list[str] | None = None,
         mode: str = "all",
         force: bool = False,
     ) -> None:
         """Incremental indexing pipeline. Delegates to :class:`RagIndexer`."""
         await self._indexer.index_documents(
             documents_dir=documents_dir,
-            entity_types=entity_types,
             mode=mode,
             force=force,
         )

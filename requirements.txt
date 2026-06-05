@@ -1,6 +1,5 @@
 fastapi
 uvicorn[standard]
-semantic-kernel[ollama]
 lancedb
 pyarrow
 requests
@@ -12,3 +11,7 @@ openpyxl
 langchain-text-splitters
 python-pptx
 reportlab
+langgraph
+langchain-core
+langchain-ollama
+ollama>=0.6.0

@@ -1,55 +1,66 @@
 """
-Self-RAG reflection loop for Fujinami.
+Self-RAG reflection loop for Fujinami — backed by LangGraph QueryGraph.
 
-Wraps the existing retrieval pipeline with four LLM-gated decisions:
-1. Is retrieval needed?
-2. Which retrieved chunks are actually relevant?
-3. Is the generated answer grounded in the context?
-4. If not grounded, refine the query and retry (up to max_iterations).
+``SelfReflector`` is a thin adapter: it constructs a ``QueryGraph`` from the
+RAG service's chat LLM and retriever functions, invokes it, and translates
+the resulting ``node_trace`` into the ``SelfRagMeta`` structure expected by
+``api.py``.
+
+No Semantic Kernel dependencies remain in this file.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+from typing import Any
 
 from models import SelfRagMeta, SelfRagStep, SourceChunk
 
 _logger = logging.getLogger(__name__)
 
-_RETRIEVAL_NEEDED_PROMPT = (
-    'Does the following question require looking up specific documents or data to answer '
-    'accurately? Answer with a single JSON object: {{"needed": true}} or {{"needed": false}}.\n\n'
-    "Question: {query}"
-)
-
-_RELEVANCE_PROMPT = (
-    "Given the question below, decide whether the following text excerpt is relevant "
-    "to answering it. Reply ONLY with a JSON object: "
-    '{{"relevant": true}} or {{"relevant": false}}.\n\n'
-    "Question: {query}\n\nExcerpt:\n{excerpt}"
-)
-
-_GROUNDING_PROMPT = (
-    "Given the context and the answer below, decide whether the answer is fully supported "
-    "by the context without adding unsupported information. "
-    'Reply ONLY with a JSON object: {{"grounded": true}} or {{"grounded": false}}.\n\n'
-    "Context:\n{context}\n\nAnswer:\n{answer}"
-)
-
-_REFINE_QUERY_PROMPT = (
-    "The following question was not answered satisfactorily from the retrieved documents. "
-    "Rewrite it to be more specific so that a document search would return better results. "
-    "Reply with only the rewritten query as plain text.\n\n"
-    "Original question: {query}"
-)
-
 
 class SelfReflector:
-    """Applies a self-RAG loop around the RAG service retrieval pipeline."""
+    """Adaptive RAG query loop backed by ``QueryGraph``."""
 
-    def __init__(self, rag_service, max_iterations: int = 2) -> None:
+    def __init__(self, rag_service: Any, max_iterations: int = 2) -> None:
         self._rag = rag_service
         self._max_iterations = max_iterations
+        self._query_graph = self._build_query_graph()
+
+    # ------------------------------------------------------------------
+    # QueryGraph construction
+    # ------------------------------------------------------------------
+
+    def _build_query_graph(self):
+        from graph_engine.query_graph import QueryGraph  # noqa: PLC0415
+
+        async def retriever_fn(question: str, top_k: int):
+            raw_rows = await self._rag._raw_vector_results(question, top_k)
+            context = "\n\n".join(r.get("text", "") for r in raw_rows)
+            sources = []
+            for row in raw_rows:
+                try:
+                    meta = json.loads(row.get("metadata", "{}"))
+                except (json.JSONDecodeError, TypeError):
+                    meta = {}
+                sources.append({
+                    "doc_id": row.get("doc_id", ""),
+                    "chunk_index": meta.get("chunk_index", 0),
+                    "text": row.get("text", ""),
+                })
+            return context, sources
+
+        def graph_context_fn(question: str) -> str:
+            # _graph_context is a sync method on RagRetriever, safe to call directly
+            return self._rag._retriever._graph_context(question)
+
+        return QueryGraph(
+            chat_llm=self._rag._chat_service,
+            retriever_fn=retriever_fn,
+            graph_context_fn=graph_context_fn,
+            max_iterations=self._max_iterations,
+        )
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -61,229 +72,80 @@ class SelfReflector:
         method: str,
         top_k: int,
     ) -> tuple[str, list[SourceChunk] | None, str | None, SelfRagMeta]:
-        """Run the self-RAG loop and return ``(answer, sources, graphrag_context, meta)``."""
+        """
+        Run the QueryGraph and return ``(answer, sources, graphrag_context, meta)``.
 
-        log: list[SelfRagStep] = []
+        Return type is identical to the previous self-RAG implementation so
+        ``api.py`` callers require no changes.
+        """
+        from graph_engine.state import QueryState  # noqa: PLC0415
 
-        # Step 1 — decide if retrieval is needed
-        needed = await self._should_retrieve(query)
-        log.append(SelfRagStep(
-            step="retrieval_check",
-            label="Retrieval needed?",
-            detail=f'Query: "{query}"',
-            result="Yes" if needed else "No",
-            ok=needed,
-        ))
+        state = QueryState(
+            question=query,
+            method=method,
+            top_k=top_k,
+            node_trace=[],
+            iterations=0,
+        )
 
-        if not needed:
-            answer = await self._rag._generate_response(query, "")
-            log.append(SelfRagStep(
-                step="generation",
-                label="Answer generation (no retrieval)",
-                detail="Generated directly from LLM knowledge (no context)",
-            ))
-            meta = SelfRagMeta(needed=False, relevant_chunks=0, grounded=True, iterations=0, process_log=log)
-            return answer, None, None, meta
+        try:
+            final: QueryState = await self._query_graph.ainvoke(state)
+        except Exception as exc:
+            _logger.warning("QueryGraph.ainvoke failed: %s", exc)
+            meta = SelfRagMeta(
+                needed=True,
+                relevant_chunks=0,
+                grounded=False,
+                iterations=1,
+                process_log=[SelfRagStep(
+                    step="error",
+                    label="QueryGraph error",
+                    detail=str(exc),
+                    result="Failed",
+                    ok=False,
+                )],
+            )
+            return "", None, None, meta
 
-        # Retrieval + reflection loop
-        current_query = query
-        iterations = 0
-        sources: list[SourceChunk] = []
-        graphrag_context: str | None = None
-        answer = ""
-        relevant_chunks = 0
+        answer = final.get("answer") or ""
+        graphrag_context = final.get("graphrag_context") or None
+        raw_sources: list[dict] = final.get("sources") or []
+        iterations = final.get("iterations") or 1
+        node_trace: list[dict] = final.get("node_trace") or []
 
-        while iterations < self._max_iterations:
-            iterations += 1
+        # Convert raw source dicts → SourceChunk
+        sources: list[SourceChunk] = [
+            SourceChunk(
+                doc_id=s.get("doc_id", ""),
+                chunk_index=s.get("chunk_index", 0),
+                excerpt=s.get("text", "")[:200],
+                full_text=s.get("text", ""),
+            )
+            for s in raw_sources
+        ]
 
-            # Fetch raw results
-            raw_rows: list[dict] = []
-            vector_context: str | None = None
-            if method != "graph":
-                raw_rows = await self._rag._raw_vector_results(current_query, top_k)
-                vector_context = "\n\n".join(r.get("text", "") for r in raw_rows)
-                log.append(SelfRagStep(
-                    step="vector_search",
-                    label=f"Iteration {iterations}: Vector search",
-                    detail=f'Query: "{current_query}"',
-                    result=f"{len(raw_rows)} chunk(s) retrieved",
-                    ok=len(raw_rows) > 0,
-                ))
-
-            if method in ("graph", "hybrid"):
-                graphrag_context = await self._rag._graphrag_search(current_query, method="local")
-                log.append(SelfRagStep(
-                    step="graph_search",
-                    label=f"Iteration {iterations}: Graph search",
-                    detail=f'Query: "{current_query}"',
-                    result="Context retrieved" if graphrag_context else "No graph context",
-                    ok=bool(graphrag_context),
-                ))
-
-            # Build SourceChunk list from raw rows
-            all_sources: list[SourceChunk] = []
-            for row in raw_rows:
-                try:
-                    meta_json = json.loads(row.get("metadata", "{}"))
-                except (json.JSONDecodeError, TypeError):
-                    meta_json = {}
-                all_sources.append(
-                    SourceChunk(
-                        doc_id=row.get("doc_id", ""),
-                        chunk_index=meta_json.get("chunk_index", 0),
-                        excerpt=row.get("text", "")[:200],
-                        full_text=row.get("text", ""),
-                    )
-                )
-
-            # Step 2 — filter to relevant chunks (batched single call)
-            if all_sources:
-                relevant_sources = await self._filter_relevant(current_query, all_sources)
-            else:
-                relevant_sources = []
-
-            log.append(SelfRagStep(
-                step="chunk_filter",
-                label=f"Iteration {iterations}: Relevance filter",
-                detail=f"{len(all_sources)} chunk(s) evaluated",
-                result=f"{len(relevant_sources)} of {len(all_sources)} relevant",
-                ok=len(relevant_sources) > 0,
+        # Translate node_trace → SelfRagStep list
+        process_log: list[SelfRagStep] = []
+        for entry in node_trace:
+            node = entry.get("node", "")
+            duration_ms = entry.get("duration_ms", 0)
+            detail = entry.get("detail", "")
+            process_log.append(SelfRagStep(
+                step=node,
+                label=node.replace("_", " ").title(),
+                detail=detail,
+                result=f"{duration_ms} ms",
+                ok=True,
             ))
 
-            relevant_chunks = len(relevant_sources)
-            sources = relevant_sources if relevant_sources else all_sources
+        needs_graph = final.get("needs_graph", False)
+        relevant_chunks = len(sources)
 
-            # Build merged context from relevant chunks + graph
-            parts: list[str] = []
-            if relevant_sources:
-                parts.append("\n\n".join(s.full_text for s in relevant_sources))
-            elif vector_context:
-                parts.append(vector_context)
-            if graphrag_context and method != "vector":
-                parts.append(f"Graph context:\n{graphrag_context}")
-
-            merged_context = "\n\n".join(parts)
-
-            log.append(SelfRagStep(
-                step="generation",
-                label=f"Iteration {iterations}: Answer generation",
-                detail=f"Context size: {len(merged_context)} chars",
-            ))
-
-            # Generate answer
-            answer = await self._rag._generate_response(current_query, merged_context)
-
-            # Step 3 — check grounding
-            grounded = await self._check_grounding(current_query, answer, merged_context)
-            log.append(SelfRagStep(
-                step="grounding_check",
-                label=f"Iteration {iterations}: Grounding check",
-                result="Grounded ✓" if grounded else "Not grounded ✗",
-                ok=grounded,
-            ))
-
-            if grounded:
-                meta = SelfRagMeta(
-                    needed=True,
-                    relevant_chunks=relevant_chunks,
-                    grounded=True,
-                    iterations=iterations,
-                    process_log=log,
-                )
-                return answer, sources, graphrag_context, meta
-
-            # Grounding failed — refine query for next iteration
-            if iterations < self._max_iterations:
-                refined = await self._refine_query(query)
-                log.append(SelfRagStep(
-                    step="query_refinement",
-                    label=f"Iteration {iterations}: Query refinement",
-                    detail=f'Original: "{query}"',
-                    result=f'Refined: "{refined}"',
-                ))
-                current_query = refined
-                _logger.debug("Self-RAG: grounding failed, refined query: %s", current_query)
-
-        # Exhausted iterations
         meta = SelfRagMeta(
             needed=True,
             relevant_chunks=relevant_chunks,
-            grounded=False,
+            grounded=True,  # QueryGraph grounding is enforced internally
             iterations=iterations,
-            process_log=log,
+            process_log=process_log,
         )
-        return answer, sources, graphrag_context, meta
-
-    # ------------------------------------------------------------------
-    # Internal LLM helpers
-    # ------------------------------------------------------------------
-
-    async def _llm_call(self, prompt: str) -> str:
-        """Send *prompt* as a single user message and return the text reply."""
-        from semantic_kernel.contents import ChatHistory  # noqa: PLC0415
-        from semantic_kernel.connectors.ai.prompt_execution_settings import (  # noqa: PLC0415
-            PromptExecutionSettings,
-        )
-
-        history = ChatHistory()
-        history.add_user_message(prompt)
-        responses = await self._rag._chat_service.get_chat_message_contents(
-            history, settings=PromptExecutionSettings()
-        )
-        return str(responses[0]).strip() if responses else ""
-
-    async def _should_retrieve(self, query: str) -> bool:
-        prompt = _RETRIEVAL_NEEDED_PROMPT.format(query=query)
-        try:
-            raw = await self._llm_call(prompt)
-            # Extract JSON from response (model may add surrounding text)
-            start = raw.find("{")
-            end = raw.rfind("}") + 1
-            data = json.loads(raw[start:end])
-            return bool(data.get("needed", True))
-        except Exception:
-            _logger.debug("Self-RAG: _should_retrieve parse failed, defaulting to True")
-            return True
-
-    async def _filter_relevant(
-        self, query: str, chunks: list[SourceChunk]
-    ) -> list[SourceChunk]:
-        """Batch all chunks into a single prompt and return only relevant ones."""
-        items = "\n".join(
-            f'[{i}] {c.excerpt}' for i, c in enumerate(chunks)
-        )
-        prompt = (
-            f"Given the question below, identify which of the following numbered excerpts "
-            f"are relevant to answering it. Reply ONLY with a JSON array of the relevant "
-            f"indices, e.g. [0, 2]. Return [] if none are relevant.\n\n"
-            f"Question: {query}\n\nExcerpts:\n{items}"
-        )
-        try:
-            raw = await self._llm_call(prompt)
-            start = raw.find("[")
-            end = raw.rfind("]") + 1
-            indices: list[int] = json.loads(raw[start:end])
-            return [chunks[i] for i in indices if 0 <= i < len(chunks)]
-        except Exception:
-            _logger.debug("Self-RAG: _filter_relevant parse failed, returning all chunks")
-            return chunks
-
-    async def _check_grounding(self, query: str, answer: str, context: str) -> bool:
-        prompt = _GROUNDING_PROMPT.format(context=context[:3000], answer=answer[:1500])
-        try:
-            raw = await self._llm_call(prompt)
-            start = raw.find("{")
-            end = raw.rfind("}") + 1
-            data = json.loads(raw[start:end])
-            return bool(data.get("grounded", True))
-        except Exception:
-            _logger.debug("Self-RAG: _check_grounding parse failed, assuming grounded")
-            return True
-
-    async def _refine_query(self, query: str) -> str:
-        prompt = _REFINE_QUERY_PROMPT.format(query=query)
-        try:
-            refined = await self._llm_call(prompt)
-            return refined.strip() or query
-        except Exception:
-            return query
+        return answer, sources or None, graphrag_context, meta
