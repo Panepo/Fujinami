@@ -215,39 +215,7 @@ class RagRetriever:
             self._query_embedding_service.embed_query, query
         )
         vector_results = self._table.search(vector).limit(top_k).to_list()
-        title_results = self._title_search_results(query)
-        seen_ids: set[str] = {r["id"] for r in vector_results}
-        for row in title_results:
-            if row.get("id") not in seen_ids:
-                vector_results.append(row)
-                seen_ids.add(row.get("id"))
         return vector_results
-
-    def _title_search_results(self, query: str) -> list[dict]:
-        """Return LanceDB rows whose ``section_title`` contains any keyword from *query*."""
-        if not self._ensure_table():
-            return []
-        try:
-            keywords = [w.lower() for w in query.split() if len(w) > 2]
-            if not keywords:
-                return []
-            df = self._table.to_pandas()
-
-            def _title_matches(metadata_str: str) -> bool:
-                try:
-                    meta = json.loads(metadata_str)
-                    title = (meta.get("section_title") or "").lower()
-                    return any(kw in title for kw in keywords)
-                except (json.JSONDecodeError, TypeError):
-                    return False
-
-            mask = df["metadata"].apply(_title_matches)
-            matched = df[mask]
-            logger.debug("Title search found %d rows for query '%s'", len(matched), query)
-            return matched.to_dict(orient="records")
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("Title search failed: %s", exc)
-            return []
 
     def _graph_context(self, query: str) -> str:
         """
