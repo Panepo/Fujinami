@@ -589,6 +589,9 @@ async def _stream_answer_inner(
         ]
 
         async for chunk in rag._chat_service.astream(messages):
+            thinking = (chunk.additional_kwargs or {}).get("reasoning_content") or ""
+            if thinking:
+                yield f"event: think\ndata: {json.dumps(thinking)}\n\n"
             text = chunk.content if hasattr(chunk, "content") else str(chunk)
             if text:
                 yield f"event: token\ndata: {json.dumps(text)}\n\n"

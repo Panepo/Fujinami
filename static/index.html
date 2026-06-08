@@ -288,6 +288,19 @@
       }
     }
 
+    #think-box {
+      background: #faf5ff;
+      border-radius: 4px;
+      padding: 8px 12px;
+      font-size: .80rem;
+      white-space: pre-wrap;
+      color: #6b21a8;
+      font-style: italic;
+      max-height: 240px;
+      overflow-y: auto;
+      margin-top: 6px;
+    }
+
     #query-stats {
       display: flex;
       gap: 18px;
@@ -998,6 +1011,10 @@
           </div>
         </div>
         <div id="rewrite-preview"></div>
+        <details id="think-detail" style="display:none;margin-top:8px">
+          <summary style="font-size:.85rem;color:#6d28d9;cursor:pointer">&#x1F9E0; Thinking…</summary>
+          <div id="think-box"></div>
+        </details>
         <div id="answer-box"></div>
         <div id="query-stats"></div>
         <div id="self-rag-meta"
@@ -1569,8 +1586,9 @@
       return ms < 1000 ? ms + ' ms' : (ms / 1000).toFixed(2) + ' s';
     }
 
-    function showQueryStats(firstMs, totalMs, words) {
-      const wps = totalMs > 0 ? (words / (totalMs / 1000)).toFixed(1) : '—';
+    function showQueryStats(firstMs, totalMs, words, thinkWords = 0) {
+      const totalWords = words + thinkWords;
+      const wps = totalMs > 0 ? (totalWords / (totalMs / 1000)).toFixed(1) : '—';
       $('query-stats').innerHTML =
         `<span>First response: <strong>${fmtMs(firstMs)}</strong></span>` +
         `<span>Total time: <strong>${fmtMs(totalMs)}</strong></span>` +
@@ -1634,6 +1652,8 @@
       $('rewrite-meta-body').innerHTML = '';
       $('rewrite-preview').style.display = 'none';
       $('rewrite-preview').innerHTML = '';
+      $('think-detail').style.display = 'none';
+      $('think-box').textContent = '';
       $('sources-detail').style.display = 'none';
       $('tbl-sources').querySelector('tbody').innerHTML = '';
       clearContextPanel();
@@ -1731,6 +1751,7 @@
 
     async function streamQuery(col, query, method, rewrite = null) {
       let answer = '';
+      let thinkText = '';
       let firstTokenMs = null;
       let streamedSources = [];
       const box = $('answer-box');
@@ -1776,10 +1797,31 @@
               else if (line.startsWith('data: ')) data = line.slice(6).trim();
             }
             if (eventType === 'token') {
-              if (firstTokenMs === null) firstTokenMs = Date.now() - _queryStart;
+              if (firstTokenMs === null) {
+                firstTokenMs = Date.now() - _queryStart;
+                const td = $('think-detail');
+                if (td.style.display !== 'none') {
+                  td.open = false;
+                  const s = td.querySelector('summary');
+                  if (s) s.textContent = '\uD83E\uDDE0 Thinking (done)';
+                }
+              }
               try { answer += JSON.parse(data); } catch (_) { answer += data; }
               box.textContent = answer;
               await new Promise(r => setTimeout(r, 0));
+            } else if (eventType === 'think') {
+              try {
+                const tok = JSON.parse(data);
+                if (tok) {
+                  if (firstTokenMs === null) {
+                    firstTokenMs = Date.now() - _queryStart;
+                  }
+                  thinkText += tok;
+                  $('think-detail').style.display = '';
+                  $('think-detail').open = true;
+                  $('think-box').textContent += tok;
+                }
+              } catch (_) { }
             } else if (eventType === 'chunks') {
               try { renderContextChunks(JSON.parse(data)); } catch (_) { }
             } else if (eventType === 'graphrag') {
@@ -1809,7 +1851,8 @@
         }
         const totalMs = Date.now() - _queryStart;
         const words = answer.trim().split(/\s+/).filter(Boolean).length;
-        showQueryStats(firstTokenMs ?? totalMs, totalMs, words);
+        const thinkWords = thinkText.trim().split(/\s+/).filter(Boolean).length;
+        showQueryStats(firstTokenMs ?? totalMs, totalMs, words, thinkWords);
       } catch (e) { box.textContent = 'Error: ' + e.message; }
     }
 

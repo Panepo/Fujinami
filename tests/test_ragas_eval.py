@@ -27,7 +27,8 @@ from .ragas_helpers import collect_rag_samples, load_questions
 def _emit_report(pytestconfig: pytest.Config, rows, summary) -> None:
     # Use pytest terminal reporter so output is visible even when capture is enabled.
     terminal_reporter = pytestconfig.pluginmanager.get_plugin("terminalreporter")
-    rows_json = json.dumps(rows, ensure_ascii=True, indent=2)
+    public_rows = [{k: v for k, v in row.items() if not k.startswith("_")} for row in rows]
+    rows_json = json.dumps(public_rows, ensure_ascii=True, indent=2)
     summary_json = json.dumps(summary, ensure_ascii=True, indent=2)
     lines = [
         "",
@@ -59,11 +60,18 @@ def _ollama_openai_base_url(base_url: str) -> str:
     return f"{normalized}/v1"
 
 
+_MAX_CONTEXT_CHARS = 1_200   # per retrieved chunk
+_MAX_CONTEXTS = 3            # max chunks passed to a metric
+_MAX_RESPONSE_CHARS = 1_200  # cap answer length sent to metrics
+
+
 async def _score(metric, sample) -> float:
+    contexts = sample.retrieved_contexts or []
+    truncated_contexts = [c[:_MAX_CONTEXT_CHARS] for c in contexts[:_MAX_CONTEXTS]]
     available = {
         "user_input": sample.user_input,
-        "response": sample.response,
-        "retrieved_contexts": sample.retrieved_contexts,
+        "response": (sample.response or "")[:_MAX_RESPONSE_CHARS],
+        "retrieved_contexts": truncated_contexts,
         "reference": sample.reference,
     }
     inputs = {
@@ -85,10 +93,14 @@ async def _evaluate_collection_metrics(samples, metrics) -> list[dict[str, objec
     rows: list[dict[str, object]] = []
     n = len(metrics)
     for i, sample in enumerate(samples):
-        row = {"user_input": sample.user_input, "reference": sample.reference}
+        row: dict[str, object] = {"user_input": sample.user_input, "reference": sample.reference}
         for j, metric in enumerate(metrics):
             result = flat[i * n + j]
-            row[metric.name] = None if isinstance(result, BaseException) else result
+            if isinstance(result, BaseException):
+                row[metric.name] = None
+                row[f"_{metric.name}_error"] = repr(result)
+            else:
+                row[metric.name] = result
         rows.append(row)
     return rows
 
@@ -118,6 +130,7 @@ def test_ragas_evaluation(pytestconfig: pytest.Config) -> None:
         chat_model,
         provider="openai",
         client=openai_client,
+        max_tokens=8192,
     )
     embeddings = embedding_factory(
         "openai",
@@ -132,13 +145,28 @@ def test_ragas_evaluation(pytestconfig: pytest.Config) -> None:
     ]
 
     rows = asyncio.run(_evaluate_collection_metrics(dataset.samples, metrics))
-    summary = {
-        metric.name: mean(
+
+    # Warn about any scoring failures so they are visible in output.
+    for row in rows:
+        for metric in metrics:
+            val = row.get(f"_{metric.name}_error")
+            if val is not None:
+                import warnings
+                warnings.warn(
+                    f"Metric '{metric.name}' failed for '{row['user_input'][:60]}': {val}",
+                    stacklevel=2,
+                )
+
+    summary = {}
+    for metric in metrics:
+        valid = [
             float(row[metric.name])
             for row in rows
-            if isinstance(row[metric.name], int | float)
-        )
-        for metric in metrics
-    }
+            if isinstance(row[metric.name], (int, float))
+        ]
+        if not valid:
+            summary[metric.name] = None
+        else:
+            summary[metric.name] = mean(valid)
 
     _emit_report(pytestconfig, rows, summary)
