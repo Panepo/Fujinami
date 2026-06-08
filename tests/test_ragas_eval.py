@@ -118,7 +118,7 @@ def test_ragas_evaluation(pytestconfig: pytest.Config) -> None:
     samples = asyncio.run(collect_rag_samples(questions, collection_name))
     dataset = EvaluationDataset(samples=samples)
 
-    chat_model = os.environ["CHAT_MODEL"]
+    ragas_model = os.environ["RAGAS_MODEL"]
     embedding_model = os.environ["EMBEDDING_MODEL"]
     ollama_chat_url = os.environ["OLLAMA_CHAT_URL"]
     openai_client = AsyncOpenAI(
@@ -127,10 +127,10 @@ def test_ragas_evaluation(pytestconfig: pytest.Config) -> None:
     )
 
     llm = llm_factory(
-        chat_model,
+        ragas_model,
         provider="openai",
         client=openai_client,
-        max_tokens=8192,
+        max_tokens=262144,
     )
     embeddings = embedding_factory(
         "openai",
