@@ -31,8 +31,17 @@ _OLLAMA_CHAT_URL = os.environ["OLLAMA_CHAT_URL"]
 _CHAT_MODEL = os.environ["CHAT_MODEL"]
 _EMBEDDING_MODEL = os.environ["EMBEDDING_MODEL"]
 _TOP_K = int(os.environ.get("TOP_K", "5"))
+# Set RERANKER_MODEL to a cross-encoder model name to enable reranking, e.g.:
+#   cross-encoder/ms-marco-MiniLM-L-6-v2
+# Leave empty (default) to skip reranking.
+_RERANKER_MODEL = os.environ.get("RERANKER_MODEL", "")
+# How many extra candidates to fetch before reranking (candidate pool = top_k × expansion).
+_RERANKER_EXPANSION = int(os.environ.get("RERANKER_EXPANSION", "3"))
 
 _TABLE_NAME = "documents"
+
+# Sentinel used to distinguish "not yet initialised" from None (disabled).
+_SENTINEL = object()
 
 
 def _format_triple(triple: dict) -> str:
@@ -104,6 +113,43 @@ class RagRetriever:
         else:
             self._table = None
             logger.info("LanceDB table '%s' not yet created", _TABLE_NAME)
+
+        self._cross_encoder: object | None = _SENTINEL  # lazy-loaded
+
+    # ------------------------------------------------------------------
+    # Reranker helpers
+    # ------------------------------------------------------------------
+
+    def _get_cross_encoder(self) -> object | None:
+        """Lazy-load and cache a CrossEncoder model, or return None if disabled."""
+        if self._cross_encoder is _SENTINEL:
+            if _RERANKER_MODEL:
+                try:
+                    from sentence_transformers import CrossEncoder  # noqa: PLC0415
+
+                    self._cross_encoder = CrossEncoder(_RERANKER_MODEL)
+                    logger.info("Loaded reranker model '%s'", _RERANKER_MODEL)
+                except Exception as exc:  # pragma: no cover
+                    logger.warning("Failed to load reranker '%s': %s", _RERANKER_MODEL, exc)
+                    self._cross_encoder = None
+            else:
+                self._cross_encoder = None
+        return self._cross_encoder
+
+    def _rerank(self, query: str, results: list[dict], top_k: int) -> list[dict]:
+        """Rerank *results* with the cross-encoder and return the top *top_k* entries."""
+        cross_encoder = self._get_cross_encoder()
+        if cross_encoder is None or not results:
+            return results[:top_k]
+        texts = [r.get("text") or "" for r in results]
+        pairs = [[query, t] for t in texts]
+        scores = cross_encoder.predict(pairs)  # type: ignore[attr-defined]
+        ranked = sorted(zip(scores, results), key=lambda x: float(x[0]), reverse=True)
+        logger.debug(
+            "Reranker top-3 scores: %s",
+            [round(float(s), 4) for s, _ in ranked[:3]],
+        )
+        return [r for _, r in ranked[:top_k]]
 
     # ------------------------------------------------------------------
     # Lazy table accessor
@@ -207,15 +253,17 @@ class RagRetriever:
         return "\n\n".join(r["text"] for r in results)
 
     async def _raw_vector_results(self, query: str, top_k: int = _TOP_K) -> list[dict]:
-        """Return raw LanceDB rows for *query*, merging vector and title-match results."""
+        """Return raw LanceDB rows for *query*, with optional cross-encoder reranking."""
         if not self._ensure_table():
             return []
+        # Fetch an expanded candidate pool when a reranker is configured.
+        fetch_k = top_k * _RERANKER_EXPANSION if _RERANKER_MODEL else top_k
         # OllamaEmbeddings.embed_query() returns list[float] directly — no adapter needed
         vector = await asyncio.to_thread(
             self._query_embedding_service.embed_query, query
         )
-        vector_results = self._table.search(vector).limit(top_k).to_list()
-        return vector_results
+        vector_results = self._table.search(vector).limit(fetch_k).to_list()
+        return await asyncio.to_thread(self._rerank, query, vector_results, top_k)
 
     async def _raw_vector_results_from_embedding(
         self, embedding: list[float], top_k: int = _TOP_K
