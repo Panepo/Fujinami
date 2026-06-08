@@ -35,3 +35,5 @@ link-mode = "copy"
 [tool.poe.tasks]
 install = "uv pip install -r requirements.txt"
 dev = "uvicorn api:app --reload"
+eval-install = "uv pip install -r requirements-eval.txt"
+eval = "pytest tests/test_ragas_eval.py -v -s"

@@ -187,3 +187,5 @@ data/*
 models/*
 .github/reference/*
 !.github/reference/*.md
+tests/questions/*
+tests/archive/*
