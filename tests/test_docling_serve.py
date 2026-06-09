@@ -18,7 +18,6 @@ from __future__ import annotations
 import json
 import os
 import sys
-import tempfile
 from pathlib import Path
 
 import requests
@@ -35,6 +34,12 @@ BASE_URL = (
 
 TIMEOUT = 120  # seconds — generous for first-run model download
 
+TESTS_DIR = Path(__file__).parent
+FIXTURES_DIR = TESTS_DIR / "fixtures"
+DEFAULT_MD_FIXTURE = FIXTURES_DIR / "docling_smoke_test.md"
+DEFAULT_JSON_FIXTURE = FIXTURES_DIR / "docling_smoke_test.json"
+DEFAULT_IMG_FIXTURE = FIXTURES_DIR / "docling_smoke_test.jpg"
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -47,6 +52,24 @@ def _ok(label: str) -> None:
 def _fail(label: str, reason: str) -> None:
     print(f"  [FAIL] {label}: {reason}")
     sys.exit(1)
+
+
+def _resolve_fixture(file_path: Path | None, default_path: Path, label: str) -> Path:
+    if file_path is not None:
+        return file_path
+    if default_path.exists():
+        print(f"     using fixture: {default_path}")
+        return default_path
+    _fail(label, f"fixture not found: {default_path}")
+
+
+def _load_json_fixture(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        _fail("json fixture", f"fixture not found: {path}")
+    except json.JSONDecodeError as exc:
+        _fail("json fixture", f"invalid JSON in fixture {path}: {exc}")
 
 
 def _make_test_pdf(path: Path) -> bool:
@@ -96,7 +119,7 @@ def _make_test_pdf(path: Path) -> bool:
         # Embed a raster image so docling classifies it as a picture item.
         # Use the project's test image if available, otherwise fall back to
         # a minimal in-memory PNG.
-        _test_img = Path(__file__).parent / "test_img.jpg"
+        _test_img = DEFAULT_IMG_FIXTURE
         if _test_img.exists():
             img_buf = io.BytesIO(_test_img.read_bytes())
         else:
@@ -151,8 +174,9 @@ def test_health() -> None:
         _fail("GET /health", f"connection error — is docling-serve running at {BASE_URL}? ({exc})")
 
 
-def test_convert_md(file_path: Path) -> None:
+def test_convert_md(file_path: Path | None = None) -> None:
     print("\n2. Markdown conversion")
+    file_path = _resolve_fixture(file_path, DEFAULT_MD_FIXTURE, "md input")
     with open(file_path, "rb") as fh:
         r = requests.post(
             f"{BASE_URL}/v1/convert/file",
@@ -171,8 +195,10 @@ def test_convert_md(file_path: Path) -> None:
     print(f"     preview: {md[:120].strip()!r}")
 
 
-def test_convert_json(file_path: Path) -> None:
+def test_convert_json(file_path: Path | None = None) -> None:
     print("\n3. JSON conversion")
+    file_path = _resolve_fixture(file_path, DEFAULT_MD_FIXTURE, "json input")
+    expected_doc = _load_json_fixture(DEFAULT_JSON_FIXTURE)
     with open(file_path, "rb") as fh:
         r = requests.post(
             f"{BASE_URL}/v1/convert/file",
@@ -222,18 +248,20 @@ def test_convert_json(file_path: Path) -> None:
     pictures = json_doc.get("pictures", [])
     _ok(f"json_content present — texts={len(texts)}, tables={len(tables)}, pictures={len(pictures)}")
 
+    # Basic structural parity check against fixture schema sections.
+    for key in ("texts", "tables", "pictures"):
+        if key in expected_doc and key not in json_doc:
+            _fail("json_content", f"missing expected section: {key}")
+
     if texts:
         first = texts[0]
         print(f"     first text item: label={first.get('label')!r}  text={str(first.get('text',''))[:80]!r}")
 
 
-def test_image_extraction() -> None:
-    """POST test/test_img.jpg directly — docling treats image files as picture items."""
+def test_image_extraction(img_path: Path | None = None) -> None:
+    """POST fixtures/test_img.jpg directly — docling treats image files as picture items."""
     print("\n4. Image extraction (embedded base64)")
-    img_path = Path(__file__).parent / "test_img.jpg"
-    if not img_path.exists():
-        print(f"     [SKIP] {img_path} not found — skipping image extraction test")
-        return
+    img_path = _resolve_fixture(img_path, DEFAULT_IMG_FIXTURE, "image input")
 
     with open(img_path, "rb") as fh:
         r = requests.post(
@@ -299,23 +327,10 @@ def main() -> None:
     print(f"Target: {BASE_URL}")
     print("=" * 50)
 
-    with tempfile.TemporaryDirectory() as tmp:
-        pdf_path = Path(tmp) / "test_doc.pdf"
-        txt_path = Path(tmp) / "test_doc.md"
-
-        if _make_test_pdf(pdf_path):
-            test_file = pdf_path
-            print(f"\nUsing generated PDF: {test_file.name}")
-        else:
-            _make_test_txt(txt_path)
-            test_file = txt_path
-            print(f"\nreportlab not installed — using plain Markdown: {test_file.name}")
-            print("  (pip install reportlab for PDF testing)")
-
-        test_health()
-        test_convert_md(test_file)
-        test_convert_json(test_file)
-        test_image_extraction()
+    test_health()
+    test_convert_md()
+    test_convert_json()
+    test_image_extraction()
 
     print("\n" + "=" * 50)
     print("All tests passed.")

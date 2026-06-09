@@ -54,7 +54,7 @@ async def collect_rag_samples(
         user_input = row["question"]
         reference = row.get("ground_truth", "")
         response, raw_results = await asyncio.gather(
-            svc.hybrid_search(user_input),
+            svc.vector_search(user_input),
             svc._raw_vector_results(user_input),
         )
         contexts = [str(r.get("text", "")) for r in raw_results if r.get("text")]

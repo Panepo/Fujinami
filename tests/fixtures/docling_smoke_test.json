@@ -1,0 +1,91 @@
+{
+  "schema_name": "DoclingDocument",
+  "name": "docling-serve test document",
+  "origin": {
+    "mimetype": "text/markdown",
+    "binary_hash": 0,
+    "filename": "docling_smoke_test.md"
+  },
+  "texts": [
+    {
+      "self_ref": "#/texts/0",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "label": "title",
+      "text": "docling-serve test document",
+      "orig": "docling-serve test document"
+    },
+    {
+      "self_ref": "#/texts/1",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "label": "section_header",
+      "text": "Section 1: Introduction",
+      "orig": "Section 1: Introduction"
+    },
+    {
+      "self_ref": "#/texts/2",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "label": "paragraph",
+      "text": "This is a simple paragraph for testing docling-serve.",
+      "orig": "This is a simple paragraph for testing docling-serve."
+    }
+  ],
+  "tables": [
+    {
+      "self_ref": "#/tables/0",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "data": {
+        "grid": [
+          [
+            "Feature",
+            "Status"
+          ],
+          [
+            "Markdown output",
+            "OK"
+          ],
+          [
+            "JSON output",
+            "OK"
+          ],
+          [
+            "Table extraction",
+            "OK"
+          ],
+          [
+            "Image extraction",
+            "OK"
+          ]
+        ]
+      }
+    }
+  ],
+  "pictures": [
+    {
+      "self_ref": "#/pictures/0",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "caption": "Smoke test image",
+      "image": {
+        "mimetype": "image/jpeg",
+        "uri": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2w=="
+      }
+    }
+  ],
+  "body": {
+    "$ref": "#/texts/0"
+  }
+}
