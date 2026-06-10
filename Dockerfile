@@ -17,9 +17,9 @@ COPY requirements.txt .
 
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
-# Download the bundled spaCy model used by graph_engine extractors and retriever
+# Install spaCy model as a fallback when local bundled model is unavailable.
 RUN PYTHONPATH=/install/lib/python3.12/site-packages \
-  python -m spacy download en_core_web_sm
+  python -m spacy download en_core_web_sm || true
 
 # ---------------------------------------------------------------------------
 # Runtime stage
@@ -37,7 +37,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /install /usr/local
 
 # Copy application source
-COPY api.py models.py rag_service.py retriever.py document_loader.py self_reflector.py __init__.py ./
+COPY api.py models.py rag_service.py retriever.py document_loader.py rewriter.py self_reflector.py __init__.py ./
+COPY models/ ./models/
 COPY indexer/ ./indexer/
 COPY graph_engine/ ./graph_engine/
 COPY static/ ./static/
@@ -51,10 +52,12 @@ ENV PYTHONUNBUFFERED=1 \
   DOCLING_URL=http://docling-serve:5001 \
   OLLAMA_INDEX_URL=http://host.docker.internal:11434 \
   OLLAMA_CHAT_URL=http://host.docker.internal:11434 \
-  CHAT_MODEL=gemma4:e2b \
+  CHAT_MODEL=qwen3.6:35b \
+  CHAT_MODEL_THINK=true \
   EMBEDDING_MODEL=embeddinggemma:300m \
-  VLM_MODEL=gemma4:e4b \
+  VLM_MODEL=llava:7b \
   VLM_TIMEOUT=180 \
+  OLLAMA_TIMEOUT=1800 \
   EXTRACT_MODEL=granite4.1:8b \
   GRAPH_EXTRACTOR=hybrid \
   GRAPH_CHUNK_SIZE=400 \
