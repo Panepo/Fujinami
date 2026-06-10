@@ -43,6 +43,10 @@ PIPELINE_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".tiff", ".tif", ".bmp", ".webp",
 }
 
+IMAGE_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".tiff", ".tif", ".bmp", ".webp",
+}
+
 # Formats that use Docling→Markdown passthrough (single chunk output)
 PASSTHROUGH_EXTENSIONS = {
     ".md", ".markdown", ".adoc", ".asciidoc",
@@ -272,16 +276,27 @@ _STRUCTURED_PROMPTS: Dict[str, str] = {
         "ISSUING BODY: [body or '(not visible)']\nOTHER TEXT: [remaining text]"
     ),
     "photo": (
-        "This is a product or object photograph.\n"
-        "SUBJECT: [one sentence]\nVISIBLE TEXT:\n  - [each text string]\nLABELS/STICKERS: [describe labels]"
+        "This is a product or object photograph. Read the image carefully and keep details factual.\n"
+        "Output these sections exactly:\n"
+        "SCENE SUMMARY:\n  - [1-2 concise sentences]\n"
+        "PRIMARY SUBJECTS:\n  - [object/person + notable attributes]\n"
+        "SECONDARY ELEMENTS:\n  - [background objects, tools, accessories]\n"
+        "ACTIONS / INTERACTIONS:\n  - [who/what is doing what]\n"
+        "LAYOUT / COMPOSITION:\n  - [left/center/right, foreground/background]\n"
+        "VISIBLE TEXT:\n  - [exact text strings]\n"
+        "LABELS / MARKINGS:\n  - [logos, stickers, serials, symbols]\n"
+        "VISUAL ATTRIBUTES:\n  - [colors, material, condition, style]\n"
+        "Do not invent details that are not visible."
     ),
 }
 
 _DEFAULT_STRUCTURED_PROMPT = (
-    "Read every visible text element in this image.\n"
-    "Group related items that appear in the same region, box, or section.\n"
-    "For each group write a header line, then list items as '  - [text]'.\n"
-    "Preserve spatial relationships. Do not skip any text."
+    "Inspect the image and output a structured factual description.\n"
+    "Include these sections when applicable: SCENE SUMMARY, MAJOR ELEMENTS, RELATIONSHIPS, "
+    "LAYOUT, VISIBLE TEXT, NUMBERS/UNITS, and SYMBOLS/ICONS.\n"
+    "For each section, list items as '  - [item]'.\n"
+    "Preserve spatial and logical relationships (for example A -> B, inside/outside, above/below).\n"
+    "Do not skip visible content. Do not add information that cannot be inferred from the image."
 )
 
 _COMPLEX_TYPES: frozenset = frozenset({
@@ -316,7 +331,8 @@ Rewrite the above as a clean structured description:
 4. For connections, preserve as '  * [source] --> [destination]'.
 5. Fix only clear OCR noise but preserve all real text.
 6. Do NOT omit any item. Do NOT add information not in <structured_text>.
-7. Output ONLY the formatted description. No meta-commentary.\
+7. If content is sparse, still keep the structure by including concise section headers and explicit '(none)' bullets where appropriate.
+8. Output ONLY the formatted description. No meta-commentary.\
 """
 
 _OCR_ECHO_PHRASES = (
@@ -435,6 +451,10 @@ def _group_elements(elements: List[Dict], vision_map: Optional[Dict[str, str]] =
             pic_text = vision_map.get(el["id"], "").strip()
             if pic_text:
                 groups.append([{**el, "text": pic_text}])
+            else:
+                page = el.get("page")
+                placeholder = f"[Image on page {page}]" if page is not None else "[Image]"
+                groups.append([{**el, "text": placeholder}])
             continue
         if t not in TEXT_TYPES:
             flush()
@@ -619,6 +639,20 @@ class DocumentLoader:
         self._timeout = request_timeout
         # Text model for table narration: INDEX_MODEL env var, falling back to vlm_model
         self._text_model = os.environ.get("INDEX_MODEL", vlm_model)
+        self._text_temperature = float(os.environ.get("INDEX_TEMPERATURE", "0.1"))
+        self._vlm_temperature = float(os.environ.get("VLM_TEMPERATURE", "0.2"))
+        self._vlm_synthesis_temperature = float(
+            os.environ.get("VLM_SYNTHESIS_TEMPERATURE", "0.15")
+        )
+        self._vlm_caption_max_tokens = int(
+            os.environ.get("VLM_CAPTION_MAX_TOKENS", "80")
+        )
+        self._vlm_structured_max_tokens = int(
+            os.environ.get("VLM_STRUCTURED_MAX_TOKENS", "2600")
+        )
+        self._vlm_synthesis_max_tokens = int(
+            os.environ.get("VLM_SYNTHESIS_MAX_TOKENS", "1200")
+        )
         # Chunk parameters from env
         self._chunk_size = int(os.environ.get("CHUNK_SIZE", "800"))
         self._chunk_overlap = int(os.environ.get("CHUNK_OVERLAP", "80"))
@@ -717,12 +751,25 @@ class DocumentLoader:
 
             # Stage 1 — parse
             elements, pic_info = self._stage1_parse(path, tmp_path)
+            picture_count = sum(1 for e in elements if e.get("type") == "picture")
+            logger.info(
+                "Stage 1: parsed %d elements (%d picture elements, %d extracted images)",
+                len(elements),
+                picture_count,
+                len(pic_info),
+            )
+            if picture_count > 0 and not pic_info:
+                logger.warning(
+                    "Picture elements were detected but no decodable image payloads were extracted; "
+                    "falling back to placeholders if needed."
+                )
 
             # Stage 2 — tables
             table_chunks = self._stage2_tables(elements, doc_stem)
 
             # Stage 3 — vision
             vision_map = self._stage3_vision(pic_info)
+            logger.info("Stage 3: generated %d vision summaries", len(vision_map))
 
             # Stage 4 — text chunking (injects vision text at reading position)
             text_chunks = self._stage4_chunk(elements, vision_map, doc_stem)
@@ -755,6 +802,47 @@ class DocumentLoader:
 
         json_doc = self._convert_file(path, "json")
         elements, pic_info = self._extract_elements_and_pictures_from_json(json_doc, tmp_dir)
+
+        # Some docling outputs for standalone image files can be structurally empty
+        # (no body children/pictures), while page raster images still exist under
+        # pages["<n>"].image.uri. In that case, synthesize a picture element so
+        # Stage 3 VLM and Stage 4 chunking still run.
+        if ext in IMAGE_EXTENSIONS and not elements:
+            pages = json_doc.get("pages") if isinstance(json_doc, dict) else None
+            page_no: Optional[int] = None
+            if isinstance(pages, dict) and pages:
+                try:
+                    page_no = min(int(k) for k in pages.keys())
+                except (ValueError, TypeError):
+                    page_no = 1
+            elif isinstance(pages, list) and pages:
+                page_no = 1
+
+            if page_no is not None:
+                pic_id = "e0"
+                synthetic_pic_item = {"prov": [{"page_no": page_no}], "image": None}
+                png_path = self._save_picture_from_json(
+                    synthetic_pic_item,
+                    tmp_dir,
+                    pic_id,
+                    pages=pages,
+                )
+                if png_path:
+                    elements.append(
+                        {
+                            "id": pic_id,
+                            "type": "picture",
+                            "text": "",
+                            "page": page_no,
+                            "section_path": [],
+                            "png_path": png_path,
+                        }
+                    )
+                    pic_info.append({"id": pic_id, "png_path": png_path})
+                    logger.info(
+                        "Stage 1 fallback: synthesized picture element from pages image for %s",
+                        path.name,
+                    )
 
         # PPTX: enhance heading detection
         if ext == ".pptx":
@@ -885,7 +973,12 @@ class DocumentLoader:
 
                 elif label in PICTURE_LABELS:
                     pic_id = f"e{eid}"
-                    png_path = self._save_picture_from_json(item, tmp_dir, pic_id)
+                    png_path = self._save_picture_from_json(
+                        item,
+                        tmp_dir,
+                        pic_id,
+                        pages=json_doc.get("pages"),
+                    )
                     pic_el = _add("picture", "", page, extra={"png_path": png_path})
                     elements.append(pic_el)
                     if png_path:
@@ -894,20 +987,103 @@ class DocumentLoader:
         _walk(json_doc.get("body", {}))
         return elements, pic_info
 
-    def _save_picture_from_json(self, pic_item: Dict, tmp_dir: Path, pic_id: str) -> Optional[str]:
-        """Decode an embedded base64 picture from docling-serve JSON and save as PNG."""
-        try:
-            image = pic_item.get("image")
-            if not image:
+    def _save_picture_from_json(
+        self,
+        pic_item: Dict,
+        tmp_dir: Path,
+        pic_id: str,
+        pages: Optional[Any] = None,
+    ) -> Optional[str]:
+        """Save a picture to PNG from picture-level image or page-image+bbox fallback."""
+        from PIL import Image as _PILImage
+
+        def _decode_data_uri(uri: str) -> Optional[bytes]:
+            if not uri.startswith("data:") or "," not in uri:
                 return None
-            uri = image.get("uri", "")
-            if not uri.startswith("data:"):
+            try:
+                _, encoded = uri.split(",", 1)
+                return base64.b64decode(encoded)
+            except Exception:
                 return None
-            _, encoded = uri.split(",", 1)
-            img_bytes = base64.b64decode(encoded)
+
+        def _write_png(raw: bytes) -> str:
             png_file = tmp_dir / f"{pic_id}.png"
-            png_file.write_bytes(img_bytes)
+            png_file.write_bytes(raw)
             return str(png_file)
+
+        def _page_entry_for_no(page_no: Any) -> Optional[Dict]:
+            if page_no is None:
+                return None
+            if isinstance(pages, dict):
+                return pages.get(str(page_no))
+            if isinstance(pages, list):
+                try:
+                    idx = int(page_no) - 1
+                    if 0 <= idx < len(pages):
+                        return pages[idx]
+                except Exception:
+                    return None
+            return None
+
+        try:
+            # Path 1: picture-level embedded image
+            image = pic_item.get("image") or {}
+            uri = image.get("uri", "") if isinstance(image, dict) else ""
+            direct = _decode_data_uri(uri)
+            if direct:
+                return _write_png(direct)
+
+            # Path 2: fallback to page raster + bbox crop
+            prov = pic_item.get("prov") or []
+            first_prov = prov[0] if prov else {}
+            page_no = first_prov.get("page_no")
+            page_entry = _page_entry_for_no(page_no)
+            if not isinstance(page_entry, dict):
+                return None
+
+            page_image = page_entry.get("image") or {}
+            page_uri = page_image.get("uri", "") if isinstance(page_image, dict) else ""
+            page_bytes = _decode_data_uri(page_uri)
+            if not page_bytes:
+                return None
+
+            with _PILImage.open(io.BytesIO(page_bytes)) as page_img:
+                bbox = first_prov.get("bbox") or {}
+                l = bbox.get("l")
+                t = bbox.get("t")
+                r = bbox.get("r")
+                b = bbox.get("b")
+                origin = str(bbox.get("coord_origin") or "").upper()
+
+                # If bbox is unavailable, keep the full page image as fallback.
+                if None in (l, t, r, b):
+                    crop = page_img
+                else:
+                    width, height = page_img.size
+                    if origin == "BOTTOMLEFT":
+                        x0 = min(l, r)
+                        x1 = max(l, r)
+                        y0 = min(height - t, height - b)
+                        y1 = max(height - t, height - b)
+                    else:
+                        x0 = min(l, r)
+                        x1 = max(l, r)
+                        y0 = min(t, b)
+                        y1 = max(t, b)
+
+                    x0_i = max(0, min(width, int(x0)))
+                    x1_i = max(0, min(width, int(x1)))
+                    y0_i = max(0, min(height, int(y0)))
+                    y1_i = max(0, min(height, int(y1)))
+
+                    if x1_i <= x0_i or y1_i <= y0_i:
+                        crop = page_img
+                    else:
+                        crop = page_img.crop((x0_i, y0_i, x1_i, y1_i))
+
+                out = io.BytesIO()
+                crop.convert("RGB").save(out, format="PNG")
+                return _write_png(out.getvalue())
         except Exception as exc:
             logger.debug("Could not save picture %s: %s", pic_id, exc)
             return None
@@ -1143,7 +1319,13 @@ class DocumentLoader:
             return ""
 
         # Pass 1: image type classification
-        caption = self._ollama_vision(self._vlm_model, _CAPTION_PROMPT, b64, max_tokens=60)
+        caption = self._ollama_vision(
+            self._vlm_model,
+            _CAPTION_PROMPT,
+            b64,
+            max_tokens=self._vlm_caption_max_tokens,
+            temperature=0.0,
+        )
         if not caption:
             return ""
         type_key = _classify_vision_caption(caption)
@@ -1152,7 +1334,13 @@ class DocumentLoader:
 
         # Pass 2: structured extraction
         pass2_prompt = _STRUCTURED_PROMPTS.get(type_key, _DEFAULT_STRUCTURED_PROMPT)
-        ocr = self._ollama_vision(self._vlm_model, pass2_prompt, b64, max_tokens=2000)
+        ocr = self._ollama_vision(
+            self._vlm_model,
+            pass2_prompt,
+            b64,
+            max_tokens=self._vlm_structured_max_tokens,
+            temperature=self._vlm_temperature,
+        )
         if _is_ocr_echo(ocr):
             logger.warning("Vision pass2: OCR echo detected, discarding")
             ocr = ""
@@ -1164,7 +1352,11 @@ class DocumentLoader:
                 caption=caption.strip() or "(not available)",
                 ocr_deduped=ocr_deduped.strip() or "(not available)",
             )
-            synthesized = self._ollama_text(synthesis_prompt)
+            synthesized = self._ollama_text(
+                synthesis_prompt,
+                max_tokens=self._vlm_synthesis_max_tokens,
+                temperature=self._vlm_synthesis_temperature,
+            )
             if synthesized and synthesized.strip():
                 return synthesized.strip()
 
@@ -1347,26 +1539,45 @@ class DocumentLoader:
     # Ollama HTTP helpers
     # ------------------------------------------------------------------
 
-    def _ollama_text(self, prompt: str, max_tokens: int = 600) -> str:
+    def _ollama_text(
+        self,
+        prompt: str,
+        max_tokens: int = 600,
+        temperature: Optional[float] = None,
+    ) -> str:
         """Text-only Ollama /api/generate call (uses INDEX_MODEL / text_model)."""
         return self._ollama_call(
             model=self._text_model,
             prompt=prompt,
             image_b64=None,
             max_tokens=max_tokens,
+            temperature=(self._text_temperature if temperature is None else temperature),
         )
 
-    def _ollama_vision(self, model: str, prompt: str, image_b64: str, max_tokens: int = 800) -> str:
+    def _ollama_vision(
+        self,
+        model: str,
+        prompt: str,
+        image_b64: str,
+        max_tokens: int = 800,
+        temperature: Optional[float] = None,
+    ) -> str:
         """Vision Ollama /api/generate call with image attachment."""
         return self._ollama_call(
             model=model,
             prompt=prompt,
             image_b64=image_b64,
             max_tokens=max_tokens,
+            temperature=(self._vlm_temperature if temperature is None else temperature),
         )
 
     def _ollama_call(
-        self, model: str, prompt: str, image_b64: Optional[str], max_tokens: int
+        self,
+        model: str,
+        prompt: str,
+        image_b64: Optional[str],
+        max_tokens: int,
+        temperature: float,
     ) -> str:
         import urllib.error
         import urllib.request
@@ -1375,7 +1586,7 @@ class DocumentLoader:
             "model": model,
             "prompt": prompt,
             "stream": False,
-            "options": {"temperature": 0.1, "num_predict": max_tokens},
+            "options": {"temperature": temperature, "num_predict": max_tokens},
         }
         if image_b64:
             payload["images"] = [image_b64]

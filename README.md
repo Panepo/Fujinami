@@ -112,6 +112,16 @@ GRAPH_CHUNK_OVERLAP=80
 # Optional: VLM HTTP timeout in seconds (default 180)
 VLM_TIMEOUT=180
 
+# Optional: VLM generation detail controls
+# - caption pass: image type classification
+# - structured pass: detailed extraction from the image
+# - synthesis pass: final formatted description used in chunks
+VLM_TEMPERATURE=0.2
+VLM_SYNTHESIS_TEMPERATURE=0.15
+VLM_CAPTION_MAX_TOKENS=80
+VLM_STRUCTURED_MAX_TOKENS=2600
+VLM_SYNTHESIS_MAX_TOKENS=1200
+
 # Optional: Ollama API timeout in seconds (default 1800)
 OLLAMA_TIMEOUT=1800
 
@@ -120,6 +130,9 @@ TOP_K=5
 
 # Optional: model override used only during indexing (defaults to CHAT_MODEL)
 INDEX_MODEL=
+
+# Optional: temperature for non-vision indexing LLM calls (table narration, synthesis helpers)
+INDEX_TEMPERATURE=0.1
 ```
 
 > If you only have one Ollama instance, set both `OLLAMA_INDEX_URL` and `OLLAMA_CHAT_URL` to the same URL.
