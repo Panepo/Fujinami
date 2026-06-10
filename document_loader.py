@@ -21,6 +21,7 @@ load_directory() → dict[str, list[dict]]   (filename → chunks)
 from __future__ import annotations
 
 import base64
+import csv
 import hashlib
 import io
 import json
@@ -39,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 # Formats that go through the full 5-stage pipeline
 PIPELINE_EXTENSIONS = {
-    ".pdf", ".docx", ".xlsx", ".pptx",
+    ".pdf", ".docx", ".xlsx", ".csv", ".pptx",
     ".png", ".jpg", ".jpeg", ".tiff", ".tif", ".bmp", ".webp",
 }
 
@@ -51,7 +52,7 @@ IMAGE_EXTENSIONS = {
 PASSTHROUGH_EXTENSIONS = {
     ".md", ".markdown", ".adoc", ".asciidoc",
     ".tex", ".html", ".htm", ".xhtml",
-    ".csv", ".txt", ".text", ".vtt",
+    ".txt", ".text", ".vtt",
     ".wav", ".mp3", ".m4a", ".aac", ".ogg", ".flac",
     ".mp4", ".avi", ".mov",
 }
@@ -580,6 +581,13 @@ def _chunk_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 # ---------------------------------------------------------------------------
 # Narration table prompt
 # ---------------------------------------------------------------------------
@@ -656,6 +664,27 @@ class DocumentLoader:
         # Chunk parameters from env
         self._chunk_size = int(os.environ.get("CHUNK_SIZE", "800"))
         self._chunk_overlap = int(os.environ.get("CHUNK_OVERLAP", "80"))
+        self._table_chunk_size = int(os.environ.get("TABLE_CHUNK_SIZE", "0"))
+        self._enable_massive_table_strategy = _env_bool(
+            "ENABLE_MASSIVE_TABLE_STRATEGY",
+            default=False,
+        )
+        self._massive_profile_metrics_per_chunk = max(
+            5,
+            int(os.environ.get("MASSIVE_ENTITY_METRICS_PER_CHUNK", "40")),
+        )
+        self._massive_comparison_window = max(
+            2,
+            int(os.environ.get("MASSIVE_COMPARISON_WINDOW", "4")),
+        )
+        self._massive_comparison_overlap = max(
+            0,
+            int(os.environ.get("MASSIVE_COMPARISON_OVERLAP", "1")),
+        )
+        self._massive_comparison_max_metrics = max(
+            8,
+            int(os.environ.get("MASSIVE_COMPARISON_MAX_METRICS", "36")),
+        )
         # docling-serve base URL (env var takes priority over constructor arg)
         self._docling_url = (
             os.environ.get("DOCLING_URL")
@@ -798,6 +827,9 @@ class DocumentLoader:
 
         if ext == ".xlsx":
             elements = self._parse_excel(path)
+            return elements, []
+        if ext == ".csv":
+            elements = self._parse_csv(path)
             return elements, []
 
         json_doc = self._convert_file(path, "json")
@@ -1112,22 +1144,72 @@ class DocumentLoader:
                     rows.append(cells)
             if not rows:
                 continue
-            header = rows[0]
-            sep = ["---"] * len(header)
-            md_lines = [
-                "| " + " | ".join(header) + " |",
-                "| " + " | ".join(sep) + " |",
-            ]
-            for row in rows[1:]:
-                padded = row + [""] * max(0, len(header) - len(row))
-                md_lines.append("| " + " | ".join(padded[:len(header)]) + " |")
+            markdown = self._rows_to_markdown(rows)
             elements.append({
                 "id": f"e{eid}", "type": "table",
-                "text": "\n".join(md_lines),
+                "text": markdown,
                 "page": None, "section_path": [sheet_name],
+                "sheet_name": sheet_name,
+                "table_rows": rows,
             })
             eid += 1
         return elements
+
+    def _parse_csv(self, path: Path) -> List[Dict]:
+        """Parse CSV into the same table element shape as XLSX sheets."""
+        rows: List[List[str]] = []
+        with open(path, "r", encoding="utf-8-sig", errors="replace", newline="") as fh:
+            sample = fh.read(4096)
+            fh.seek(0)
+            try:
+                dialect = csv.Sniffer().sniff(sample)
+            except csv.Error:
+                dialect = csv.excel
+            reader = csv.reader(fh, dialect=dialect)
+            for row in reader:
+                cleaned = [str(cell).strip() for cell in row]
+                if any(cell for cell in cleaned):
+                    rows.append(cleaned)
+
+        elements: List[Dict] = []
+        eid = 0
+        section_name = path.stem
+        elements.append({
+            "id": f"e{eid}",
+            "type": "heading",
+            "text": section_name,
+            "page": None,
+            "section_path": [],
+            "heading_level": 1,
+        })
+        eid += 1
+        if rows:
+            elements.append({
+                "id": f"e{eid}",
+                "type": "table",
+                "text": self._rows_to_markdown(rows),
+                "page": None,
+                "section_path": [section_name],
+                "sheet_name": section_name,
+                "table_rows": rows,
+            })
+        return elements
+
+    @staticmethod
+    def _rows_to_markdown(rows: List[List[str]]) -> str:
+        if not rows:
+            return ""
+        width = max(len(r) for r in rows)
+        normalized = [r + [""] * max(0, width - len(r)) for r in rows]
+        header = normalized[0]
+        sep = ["---"] * len(header)
+        lines = [
+            "| " + " | ".join(header) + " |",
+            "| " + " | ".join(sep) + " |",
+        ]
+        for row in normalized[1:]:
+            lines.append("| " + " | ".join(row) + " |")
+        return "\n".join(lines)
 
     def _reclassify_pptx_headings(self, path: Path, elements: List[Dict]) -> List[Dict]:
         """Use python-pptx signals to promote eligible shapes to headings."""
@@ -1236,6 +1318,13 @@ class DocumentLoader:
             if not (is_table or is_ascii_table) or not text.strip():
                 continue
 
+            if is_table and self._enable_massive_table_strategy:
+                massive_chunks = self._serialize_massive_table_chunks(el, doc_stem, tidx)
+                if massive_chunks:
+                    table_chunks.extend(massive_chunks)
+                    tidx += 1
+                    continue
+
             section_path = el.get("section_path", [])
             section_title = section_path[-1] if section_path else None
             page = el.get("page")
@@ -1264,22 +1353,280 @@ class DocumentLoader:
                     ridx += 1
                 logger.info("Table %d (faq): %d row chunks", tidx, ridx)
             else:
-                text_natural = self._narrate_table(text, section_title)
-                table_chunks.append({
-                    "chunk_id": f"{doc_stem}_table_{tidx}",
-                    "text": text,
-                    "text_natural": text_natural,
-                    "page_number": page,
-                    "section_title": section_title,
-                    "ocr_difficulty": diff,
-                    "rows": rows,
-                    "cols": cols,
-                    "table_type": table_type,
-                })
-                logger.info("Table %d (%s): narrated=%s", tidx, table_type, bool(text_natural))
+                parts = self._split_markdown_table(text, self._table_chunk_size)
+                if len(parts) == 1:
+                    text_natural = self._narrate_table(text, section_title)
+                    table_chunks.append({
+                        "chunk_id": f"{doc_stem}_table_{tidx}",
+                        "text": text,
+                        "text_natural": text_natural,
+                        "page_number": page,
+                        "section_title": section_title,
+                        "ocr_difficulty": diff,
+                        "rows": rows,
+                        "cols": cols,
+                        "table_type": table_type,
+                    })
+                    logger.info("Table %d (%s): narrated=%s", tidx, table_type, bool(text_natural))
+                else:
+                    for part_idx, part_text in enumerate(parts):
+                        part_natural = self._narrate_table(part_text, section_title)
+                        table_chunks.append({
+                            "chunk_id": f"{doc_stem}_table_{tidx}_part_{part_idx}",
+                            "text": part_text,
+                            "text_natural": part_natural,
+                            "page_number": page,
+                            "section_title": section_title,
+                            "ocr_difficulty": diff,
+                            "rows": rows,
+                            "cols": cols,
+                            "table_type": table_type,
+                        })
+                    logger.info("Table %d (%s): split into %d parts", tidx, table_type, len(parts))
             tidx += 1
 
         return table_chunks
+
+    def _serialize_massive_table_chunks(
+        self,
+        element: Dict,
+        doc_stem: str,
+        table_idx: int,
+    ) -> List[Dict]:
+        model = self._build_canonical_table_model(element)
+        if not self._is_massive_table_model(model):
+            return []
+
+        rows = model["rows"]
+        entity_cols = model["entity_columns"]
+        section_title = model.get("sheet_name")
+        metric_limit = self._massive_profile_metrics_per_chunk
+
+        out: List[Dict] = []
+        for entity_idx, entity in enumerate(entity_cols):
+            col_idx = entity["index"]
+            pairs = []
+            for row in rows:
+                value = row["values"].get(col_idx, "")
+                if not value:
+                    continue
+                pairs.append({
+                    "metric": row["metric"],
+                    "value": value,
+                    "unit": row.get("unit"),
+                })
+            if not pairs:
+                continue
+
+            for part_idx, start in enumerate(range(0, len(pairs), metric_limit)):
+                part = pairs[start:start + metric_limit]
+                lines = [
+                    f"Entity Profile: {entity['name']}",
+                    f"Sheet: {section_title or '(unknown)'}",
+                    f"Source: {model.get('source_name') or '(unknown)'}",
+                    "",
+                ]
+                for item in part:
+                    suffix = f" [{item['unit']}]" if item.get("unit") else ""
+                    lines.append(f"- {item['metric']}: {item['value']}{suffix}")
+                out.append({
+                    "chunk_id": f"{doc_stem}_table_{table_idx}_entity_{entity_idx}_part_{part_idx}",
+                    "text": "\n".join(lines).strip(),
+                    "text_natural": None,
+                    "page_number": element.get("page"),
+                    "section_title": section_title,
+                    "ocr_difficulty": _ocr_difficulty(len(rows), len(entity_cols) + 1),
+                    "rows": len(rows),
+                    "cols": len(entity_cols) + 1,
+                    "table_type": "massive",
+                    "chunk_type": "entity_profile",
+                    "table_strategy": "massive_entity_profile",
+                    "entity_name": entity["name"],
+                    "entity_group": f"{entity['name']}::part_{part_idx}",
+                    "sheet_name": section_title,
+                    "metric_keys": [item["metric"] for item in part],
+                })
+
+        comparison_width = self._massive_comparison_window
+        comparison_overlap = min(self._massive_comparison_overlap, comparison_width - 1)
+        step = max(1, comparison_width - comparison_overlap)
+        cmp_idx = 0
+        for start in range(0, len(entity_cols), step):
+            group = entity_cols[start:start + comparison_width]
+            if len(group) < 2:
+                continue
+            header = ["Metric"] + [c["name"] for c in group]
+            md_lines = [
+                "| " + " | ".join(header) + " |",
+                "| " + " | ".join(["---"] * len(header)) + " |",
+            ]
+            metric_keys: List[str] = []
+            for row in rows[:self._massive_comparison_max_metrics]:
+                values = [row["values"].get(c["index"], "") for c in group]
+                if not any(values):
+                    continue
+                metric = row["metric"]
+                if row.get("unit"):
+                    metric = f"{metric} ({row['unit']})"
+                md_lines.append("| " + " | ".join([metric] + values) + " |")
+                metric_keys.append(row["metric"])
+            if len(md_lines) <= 2:
+                continue
+            out.append({
+                "chunk_id": f"{doc_stem}_table_{table_idx}_comparison_{cmp_idx}",
+                "text": "\n".join(md_lines),
+                "text_natural": None,
+                "page_number": element.get("page"),
+                "section_title": section_title,
+                "ocr_difficulty": _ocr_difficulty(len(rows), len(group) + 1),
+                "rows": len(rows),
+                "cols": len(group) + 1,
+                "table_type": "massive",
+                "chunk_type": "table_comparison",
+                "table_strategy": "massive_entity_profile",
+                "sheet_name": section_title,
+                "comparison_scope": [c["name"] for c in group],
+                "metric_keys": metric_keys,
+            })
+            cmp_idx += 1
+
+        return out
+
+    def _build_canonical_table_model(self, element: Dict) -> Dict:
+        table_rows = element.get("table_rows")
+        if not isinstance(table_rows, list) or not table_rows:
+            table_rows = self._markdown_to_rows(element.get("text", ""))
+        if not table_rows:
+            return {
+                "rows": [],
+                "entity_columns": [],
+                "sheet_name": element.get("sheet_name") or (element.get("section_path") or [None])[-1],
+                "source_name": None,
+            }
+
+        width = max(len(r) for r in table_rows)
+        normalized = [
+            [str(cell).strip() for cell in (row + [""] * max(0, width - len(row)))]
+            for row in table_rows
+        ]
+
+        scan_limit = min(4, len(normalized))
+        header_row_idx = 0
+        best_score = -1
+        for idx in range(scan_limit):
+            non_empty = sum(1 for c in normalized[idx][1:] if c)
+            if non_empty > best_score:
+                best_score = non_empty
+                header_row_idx = idx
+
+        header = normalized[header_row_idx]
+        entity_columns = [
+            {"index": i, "name": name}
+            for i, name in enumerate(header)
+            if i > 0 and name
+        ]
+
+        data_rows = []
+        for row in normalized[header_row_idx + 1:]:
+            metric = row[0].strip() if row else ""
+            if not metric:
+                continue
+            values = {col["index"]: row[col["index"]].strip() for col in entity_columns}
+            if not any(values.values()):
+                continue
+            data_rows.append(
+                {
+                    "metric": metric,
+                    "unit": self._extract_unit_hint(metric),
+                    "values": values,
+                }
+            )
+
+        return {
+            "all_rows": normalized,
+            "header_row_idx": header_row_idx,
+            "attribute_col_idx": 0,
+            "entity_columns": entity_columns,
+            "rows": data_rows,
+            "sheet_name": element.get("sheet_name") or (element.get("section_path") or [None])[-1],
+            "source_name": element.get("source_name"),
+        }
+
+    @staticmethod
+    def _markdown_to_rows(markdown_text: str) -> List[List[str]]:
+        rows: List[List[str]] = []
+        for line in markdown_text.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("|"):
+                continue
+            if re.match(r'^[|\-:+ ]+$', stripped) and "-" in stripped:
+                continue
+            cells = [c.strip() for c in stripped.split("|")]
+            if cells and cells[0] == "":
+                cells = cells[1:]
+            if cells and cells[-1] == "":
+                cells = cells[:-1]
+            if cells:
+                rows.append(cells)
+        return rows
+
+    @staticmethod
+    def _extract_unit_hint(metric_name: str) -> Optional[str]:
+        m = re.search(r'unit\s*[:=]\s*([^)\],;]+)', metric_name, re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+        m2 = re.search(r'\(([^)]*unit[^)]*)\)', metric_name, re.IGNORECASE)
+        if m2:
+            text = re.sub(r'unit\s*[:=]?\s*', '', m2.group(1), flags=re.IGNORECASE).strip()
+            return text or None
+        return None
+
+    def _is_massive_table_model(self, model: Dict) -> bool:
+        rows = model.get("rows") or []
+        entity_cols = model.get("entity_columns") or []
+        if len(entity_cols) < 3 or len(rows) < 6:
+            return False
+
+        all_rows = model.get("all_rows") or []
+        header_idx = int(model.get("header_row_idx") or 0)
+        sparse_first_rows = 0
+        for row in all_rows[:header_idx]:
+            non_empty = sum(1 for c in row if c)
+            if non_empty <= max(1, len(row) // 4):
+                sparse_first_rows += 1
+
+        first_col_density = sum(1 for r in rows if r.get("metric")) / max(1, len(rows))
+        is_very_wide = len(entity_cols) >= 8
+        return bool(first_col_density >= 0.8 and (sparse_first_rows >= 1 or is_very_wide))
+
+    @staticmethod
+    def _split_markdown_table(markdown_text: str, max_chars: int) -> List[str]:
+        if max_chars <= 0 or len(markdown_text) <= max_chars:
+            return [markdown_text]
+        lines = [ln for ln in markdown_text.splitlines() if ln.strip()]
+        if len(lines) <= 3:
+            return [markdown_text]
+        header = lines[0]
+        separator = lines[1]
+        data_rows = lines[2:]
+
+        parts: List[str] = []
+        current_rows: List[str] = []
+        fixed_len = len(header) + len(separator) + 2
+        current_len = fixed_len
+
+        for row in data_rows:
+            extra = len(row) + 1
+            if current_rows and current_len + extra > max_chars:
+                parts.append("\n".join([header, separator] + current_rows))
+                current_rows = []
+                current_len = fixed_len
+            current_rows.append(row)
+            current_len += extra
+
+        if current_rows:
+            parts.append("\n".join([header, separator] + current_rows))
+        return parts or [markdown_text]
 
     def _narrate_table(self, markdown_text: str, section_title: Optional[str]) -> Optional[str]:
         """Call Ollama to convert a table to natural language. Returns None on failure."""
@@ -1511,10 +1858,11 @@ class DocumentLoader:
                 tc.get("page_number"),
             )
             embedded = f"{prefix}\n{orig}"
+            chunk_type = tc.get("chunk_type", "parts_table")
             entry: Dict = {
                 "chunk_id": tc["chunk_id"],
                 "source": "table",
-                "chunk_type": "parts_table",
+                "chunk_type": chunk_type,
                 "chunk_text_original": orig,
                 "chunk_text_embedded": embedded,
                 "chunk_text_raw": markdown,
@@ -1527,6 +1875,16 @@ class DocumentLoader:
                 "cols": tc.get("cols"),
                 "table_type": tc.get("table_type"),
             }
+            for key in (
+                "table_strategy",
+                "entity_name",
+                "entity_group",
+                "sheet_name",
+                "metric_keys",
+                "comparison_scope",
+            ):
+                if key in tc and tc.get(key) is not None:
+                    entry[key] = tc.get(key)
             unified.append(entry)
 
         logger.info(
