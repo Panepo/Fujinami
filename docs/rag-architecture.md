@@ -62,6 +62,7 @@
   - DocumentLoader: parse → table classification → VLM vision → text chunking → metadata
   - graph_engine: entity extraction (spaCy/LLM/hybrid) → triple storage
   - LanceDB upsert
+- Optional table strategy (`ENABLE_MASSIVE_TABLE_STRATEGY=1`): detect wide/transposed tables and emit `entity_profile` + `table_comparison` chunks with table-specific metadata for retrieval diagnostics.
 - Supports: PDF, DOCX, PPTX, XLSX, images, markdown, HTML, text, audio/video
 
 ## UI Form (index.html)
@@ -76,8 +77,8 @@
 - **Graph Tab**: knowledge graph visualization with filters
 
 ## Supported Document Extensions
-**Pipeline** (full processing): .pdf, .docx, .xlsx, .pptx, images
-**Passthrough** (markdown export): .md, .adoc, .tex, .html, .csv, .txt, .vtt, audio/video
+**Pipeline** (full processing): .pdf, .docx, .xlsx, .csv, .pptx, images
+**Passthrough** (markdown export): .md, .adoc, .tex, .html, .txt, .vtt, audio/video
 
 ## Response Streaming
 Uses `text/event-stream` media type:

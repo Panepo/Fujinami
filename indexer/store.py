@@ -113,6 +113,16 @@ def upsert_from_embedded_json(db: Any, table: Any, path: Path) -> Any:
             "language": chunk.get("language"),
             "chunk_hash": chunk.get("chunk_hash"),
         }
+        for key in (
+            "table_strategy",
+            "entity_name",
+            "entity_group",
+            "sheet_name",
+            "metric_keys",
+            "comparison_scope",
+        ):
+            if key in chunk and chunk.get(key) is not None:
+                meta[key] = chunk.get(key)
         rows.append(
             {
                 "id": f"{filename}#{i}",
