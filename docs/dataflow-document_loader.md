@@ -34,11 +34,11 @@ suffix.lower() in SUPPORTED_EXTENSIONS?
      │
      ├─ PASSTHROUGH_EXTENSIONS ──► _load_passthrough()
      │    .md .markdown .adoc .asciidoc .tex
-     │    .html .htm .xhtml .csv .txt .text .vtt
+     │    .html .htm .xhtml .txt .text .vtt
      │    .wav .mp3 .m4a .aac .ogg .flac .mp4 .avi .mov
      │
      └─ PIPELINE_EXTENSIONS ──► _load_pipeline()
-          .pdf .docx .xlsx .pptx
+          .pdf .docx .xlsx .csv .pptx
           .png .jpg .jpeg .tiff .tif .bmp .webp
 ```
 
@@ -109,6 +109,12 @@ file_path
     ├─ .xlsx  ──► _parse_excel()
     │                openpyxl reads each sheet
     │                sheet name → heading element
+    │                rows → pipe-separated Markdown table element
+    │                returns: elements[], pic_info=[]
+    │
+    ├─ .csv   ──► _parse_csv()
+    │                csv.Sniffer() detects dialect
+    │                file stem → heading element (sheet_name)
     │                rows → pipe-separated Markdown table element
     │                returns: elements[], pic_info=[]
     │
@@ -190,6 +196,30 @@ elements[]
         cols≥4 or rows≥9   → "MEDIUM"
         else               → "EASY"
 
+        if element.type == "table" AND ENABLE_MASSIVE_TABLE_STRATEGY=1:
+                _serialize_massive_table_chunks(element, doc_stem, tidx)
+                        _build_canonical_table_model()
+                            - infer header row (best non-empty cells in first 4 rows)
+                            - col 0 = metric/attribute
+                            - col 1..N = entity columns
+                            - parse optional unit hints from metric text
+                        _is_massive_table_model(model)
+                            - requires entity_columns ≥ 3 and metrics rows ≥ 6
+                            - first-column metric density ≥ 0.8
+                            - and (sparse rows above header OR very wide table ≥ 8 entities)
+
+                        emit `entity_profile` chunks
+                            - one entity per chunk group
+                            - long metric lists are split by MASSIVE_ENTITY_METRICS_PER_CHUNK
+
+                        emit `table_comparison` chunks
+                            - sliding entity windows over the same canonical model
+                            - window: MASSIVE_COMPARISON_WINDOW
+                            - overlap: MASSIVE_COMPARISON_OVERLAP
+                            - metrics cap: MASSIVE_COMPARISON_MAX_METRICS
+
+                if massive chunks emitted: skip legacy faq/spec/general narration path
+
     _classify_table_type(text, rows, cols)
         header contains FAQ keywords       → "faq"
         >30% data rows contain "?"         → "faq"
@@ -211,6 +241,13 @@ elements[]
 Output per chunk:
   chunk_id, text, text_natural, page_number, section_title,
   ocr_difficulty, rows, cols, table_type
+
+Additional fields for massive-table chunks:
+    chunk_type (`entity_profile` or `table_comparison`),
+    table_strategy (`massive_entity_profile`),
+    sheet_name, metric_keys,
+    entity_name/entity_group (entity profiles),
+    comparison_scope (comparison chunks)
 ```
 
 ---
@@ -348,11 +385,14 @@ text_chunks[]  +  table_chunks[]
     ▼  table chunks:
     narrated text (text_natural) preferred over raw markdown
     _build_context_prefix() applied to embedded text
-    chunk_type = "parts_table"
+    chunk_type = tc.chunk_type OR "parts_table"
 
     output fields (all of above plus):
         source="table", chunk_text_raw (raw markdown),
         ocr_difficulty, rows, cols, table_type
+        + optional passthrough metadata:
+          table_strategy, entity_name, entity_group,
+          sheet_name, metric_keys, comparison_scope
 
     ▼
     unified list of all chunks returned to _load_pipeline()
@@ -368,10 +408,10 @@ Every chunk dict returned by `load()` contains at minimum:
 |---|---|---|
 | `chunk_id` | str | Unique ID, e.g. `"mystem_3"`, `"mystem_table_0"` |
 | `source` | str | `"chunk"` or `"table"` |
-| `chunk_type` | str | `"text"` \| `"procedure_step"` \| `"picture"` \| `"parts_table"` |
+| `chunk_type` | str | `"text"` \| `"procedure_step"` \| `"picture"` \| `"parts_table"` \| `"entity_profile"` \| `"table_comparison"` |
 | `chunk_text_original` | str | Raw chunk text (for storage / display) |
 | `chunk_text_embedded` | str | Prefixed text sent to the embedding model |
-| `page_number` | int \| None | Source page (None for XLSX / passthrough) |
+| `page_number` | int \| None | Source page (None for XLSX/CSV/passthrough) |
 | `section_title` | str \| None | Innermost heading at chunk location |
 | `language` | str | ISO code in UPPER, e.g. `"EN"`, `"ZH-TW"` |
 | `chunk_hash` | str | SHA-256 of `chunk_text_original` |
@@ -384,7 +424,18 @@ Table chunks additionally carry:
 | `ocr_difficulty` | str | `"EASY"` \| `"MEDIUM"` \| `"HARD"` |
 | `rows` | int | Estimated row count |
 | `cols` | int | Estimated column count |
-| `table_type` | str | `"faq"` \| `"spec"` \| `"general"` |
+| `table_type` | str | `"faq"` \| `"spec"` \| `"general"` \| `"massive"` |
+
+Massive-table chunks may additionally include:
+
+| Field | Type | Description |
+|---|---|---|
+| `table_strategy` | str | `"massive_entity_profile"` marker for retrieval tuning |
+| `entity_name` | str | Entity column name (entity-profile chunks only) |
+| `entity_group` | str | Stable entity partition key, e.g. `"S510AD::part_0"` |
+| `sheet_name` | str | Source worksheet/file stem used as section context |
+| `metric_keys` | list[str] | Metric names serialized in this chunk |
+| `comparison_scope` | list[str] | Entity names included in a comparison window |
 
 ---
 
@@ -406,6 +457,12 @@ Table chunks additionally carry:
 | `INDEX_MODEL` | *(vlm_model)* | Ollama text model for narration and synthesis |
 | `CHUNK_SIZE` | `800` | Maximum chunk character length |
 | `CHUNK_OVERLAP` | `80` | Overlap between consecutive chunks |
+| `TABLE_CHUNK_SIZE` | `0` | Max chars per narrated table part; `0` disables splitting |
+| `ENABLE_MASSIVE_TABLE_STRATEGY` | `0` | Enable canonical massive-table serialization path |
+| `MASSIVE_ENTITY_METRICS_PER_CHUNK` | `40` | Metrics per entity-profile chunk part (min 5) |
+| `MASSIVE_COMPARISON_WINDOW` | `4` | Entities per comparison chunk window (min 2) |
+| `MASSIVE_COMPARISON_OVERLAP` | `1` | Entity overlap between adjacent windows (min 0) |
+| `MASSIVE_COMPARISON_MAX_METRICS` | `36` | Max metric rows included in each comparison chunk (min 8) |
 
 ---
 
@@ -419,6 +476,9 @@ Module-level helpers (no class dependency)
 │   ├── _ocr_difficulty(rows, cols) → str
 │   ├── _classify_table_type(text, rows, cols) → str
 │   ├── _parse_faq_rows(text) → (headers, data_rows)
+│   ├── _build_canonical_table_model(element) → dict
+│   ├── _is_massive_table_model(model) → bool
+│   ├── _serialize_massive_table_chunks(element, doc_stem, table_idx) → list[dict]
 │   └── _faq_row_to_text(headers, row) → str
 ├── Vision helpers
 │   ├── _classify_vision_caption(caption) → type_key str

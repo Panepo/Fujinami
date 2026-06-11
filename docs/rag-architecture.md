@@ -19,6 +19,12 @@
 - `TOP_K` - Default top-k for vector search (default: 5)
 - `CHUNK_SIZE` - Tokens per chunk (default: 800)
 - `CHUNK_OVERLAP` - Overlap between chunks (default: 80)
+- `TABLE_CHUNK_SIZE` - Max characters per narrated table part (`0` disables split)
+- `ENABLE_MASSIVE_TABLE_STRATEGY` - Enable massive table canonical serialization path
+- `MASSIVE_ENTITY_METRICS_PER_CHUNK` - Metrics per entity-profile chunk (default: 40)
+- `MASSIVE_COMPARISON_WINDOW` - Entity window width for comparison chunks (default: 4)
+- `MASSIVE_COMPARISON_OVERLAP` - Overlap between comparison windows (default: 1)
+- `MASSIVE_COMPARISON_MAX_METRICS` - Max metric rows per comparison chunk (default: 36)
 - `GRAPH_EXTRACTOR` - "hybrid"|"llm"|"spacy"
 - Optional: `EXTRACT_MODEL`, `INDEX_MODEL`, `VLM_TIMEOUT`, `OLLAMA_TIMEOUT`
 
@@ -29,6 +35,9 @@
 - `CollectionInfo`: name, doc_count, index_status, vector_indexed, graph_indexed
 - `IndexRequest`: mode ("vector"|"graph"|"all"), force
 - `DocumentChunk`: chunk_index, text, chunk_type, section_title, page_number
+  - Common chunk types: `text`, `procedure_step`, `picture`, `parts_table`
+  - Massive-table chunk types: `entity_profile`, `table_comparison`
+  - Massive-table metadata fields: `table_strategy`, `entity_name`, `entity_group`, `sheet_name`, `metric_keys`, `comparison_scope`
 
 ## Query Endpoint
 - **Path**: POST `/collections/{name}/query`
@@ -62,7 +71,9 @@
   - DocumentLoader: parse → table classification → VLM vision → text chunking → metadata
   - graph_engine: entity extraction (spaCy/LLM/hybrid) → triple storage
   - LanceDB upsert
+  - CSV and XLSX both enter the structured table path (not passthrough), so they can participate in table strategy routing.
 - Optional table strategy (`ENABLE_MASSIVE_TABLE_STRATEGY=1`): detect wide/transposed tables and emit `entity_profile` + `table_comparison` chunks with table-specific metadata for retrieval diagnostics.
+- Massive strategy marker: `table_strategy=massive_entity_profile` on emitted chunks, enabling retrieval/eval filtering.
 - Supports: PDF, DOCX, PPTX, XLSX, images, markdown, HTML, text, audio/video
 
 ## UI Form (index.html)

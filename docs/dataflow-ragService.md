@@ -98,12 +98,18 @@ User calls: await rag.index_documents(mode="all", force=False)
                      ▼
 ┌──────────────────────────────────────────────────────────────┐
 │  STEP 3 — DocumentLoader.load_directory(files_filter=…)      │
-│  Single Docling code path for all formats (see §2.2)         │
+│  Extension-dispatched loader flow (see §2.2)                  │
 │                                                              │
-│  any format ──▶  Docling DocumentConverter.convert(path)     │
-│                      ├─ OCR, table extraction                │
-│                      ├─ VLM picture description (VLM_MODEL)  │
-│                      └─ export_to_markdown()                  │
+│  Pipeline formats (.pdf .docx .xlsx .csv .pptx + images):   │
+│    Stage1 parse (docling-serve JSON / xlsx-csv parser)       │
+│    Stage2 table processing (faq/spec/general + optional      │
+│           massive-table strategy)                             │
+│    Stage3 vision summarization (3-pass Ollama VLM)           │
+│    Stage4 text chunking (RCTS/simple split + context prefix) │
+│    Stage5 metadata enrichment                                 │
+│                                                              │
+│  Passthrough formats (md/html/txt/vtt/audio/video):          │
+│    docling-serve markdown conversion + simple split           │
 │                                                              │
 │  Returns: {filename: [chunk_dict, …]}                        │
 │  (chunked output with section/page/language metadata)        │
@@ -150,49 +156,39 @@ Steps 4a and 4b are independent and run sequentially in the same async task. The
 
 ---
 
-### 2.2 Docling Load Flow (`DocumentLoader.load_directory`)
+### 2.2 DocumentLoader Load Flow (`DocumentLoader.load_directory`)
 
-All input formats share a single code path through Docling's `DocumentConverter`.
+`DocumentLoader` uses two paths by extension and always returns structured chunk dicts.
 
 ```
 any supported file
-   │
-   ▼
-DocumentConverter.convert(str(path))
-   │
-   ├─ Format detection (by extension + magic bytes)
-   │
-   ├─ Layout model  (LayoutModel / EasyOCR)
-   │      Segments pages into: text blocks, tables, figures
-   │
-   ├─ Table structure model
-   │      Reconstructs rows/columns → rendered as Markdown table
-   │
-   ├─ Picture description pipeline  (PDF + image inputs)
-   │      PdfPipelineOptions:
-   │        do_picture_description = True
-   │        enable_remote_services  = True
-   │      PictureDescriptionApiOptions:
-   │        url     = "{OLLAMA_INDEX_URL}/v1/chat/completions"
-   │        timeout = VLM_TIMEOUT
-   │        params  = {"model": VLM_MODEL}
-   │        prompt  = "Describe this image in detail ..."
-   │      └─ POST /v1/chat/completions  →  description text
-   │           on failure: Docling logs warning, uses placeholder
-   │
-   ├─ ASR pipeline  (audio/video inputs; requires docling[asr] + ffmpeg)
-   │      Transcribes audio → plain text
-   │
-   └─ result.document.export_to_markdown()
-          Merges all blocks (text, tables, picture captions)
-          into a single Markdown string
-   │
-   ▼
-  chunked list of dicts per document
-  [{"chunk_text": ..., "chunk_text_original": ..., "chunk_index": ...,
-    "chunk_type": ..., "section_title": ..., "page_number": ...,
-    "language": ...}, …]
-  (returned to RagIndexer as {filename: [chunk_dict, …]})
+       │
+       ▼
+suffix in SUPPORTED_EXTENSIONS?
+       │
+       ├─ passthrough extensions
+       │    (.md/.html/.txt/.vtt/audio/video)
+       │    └─ POST {DOCLING_URL}/v1/convert/file  (to_formats=md)
+       │       → simple split (CHUNK_SIZE/CHUNK_OVERLAP)
+       │
+       └─ pipeline extensions
+                (.pdf/.docx/.xlsx/.csv/.pptx/images)
+                ├─ Stage 1 parse
+                │    - xlsx/csv parsed to heading+table elements
+                │    - others: POST {DOCLING_URL}/v1/convert/file (to_formats=json)
+                ├─ Stage 2 tables
+                │    - classify faq/spec/general + table narration (INDEX_MODEL)
+                │    - optional massive strategy (`ENABLE_MASSIVE_TABLE_STRATEGY=1`):
+                │      emit `entity_profile` + `table_comparison` chunks
+                ├─ Stage 3 vision (3-pass Ollama VLM/text synthesis)
+                ├─ Stage 4 text chunking + context prefix
+                └─ Stage 5 metadata enrichment
+                             language, hash, chunk_type, table metadata
+
+Output per document:
+  [{"chunk_id": ..., "chunk_text_original": ..., "chunk_text_embedded": ...,
+        "chunk_type": ..., "section_title": ..., "page_number": ...,
+        "language": ..., "chunk_hash": ...}, …]
 ```
 
 ### 2.3 Graph Extraction Flow (`graph_engine/`)
@@ -558,9 +554,9 @@ Returns `409` if `index_status == "new_docs"`.
 | :--- | :--- | :--- |
 | `id` | `string` | `{filename}#{chunk_index}` — unique chunk key |
 | `doc_id` | `string` | Source filename — upsert/delete key |
-| `text` | `string` | Raw chunk text returned in search results |
+| `text` | `string` | Embedded text (`chunk_text_embedded`) with context prefix |
 | `vector` | `fixed_size_list<float32>[dim]` | Dimension inferred from first embed call |
-| `metadata` | `string` | JSON: `{"chunk_index": …, "chunk_type": …, "section_title": …, "page_number": …, "language": …}` |
+| `metadata` | `string` | JSON includes `source`, `chunk_index`, `chunk_type`, `section_title`, `page_number`, `language`, `chunk_hash`, plus optional massive-table keys (`table_strategy`, `entity_name`, `entity_group`, `sheet_name`, `metric_keys`, `comparison_scope`) |
 
 ### LanceDB Table: `graph_triples`
 
@@ -586,7 +582,9 @@ Returns `409` if `index_status == "new_docs"`.
 
 | Call | Triggered by | Server | Endpoint | Env var |
 | :--- | :--- | :--- | :--- | :--- |
-| VLM picture description | `DocumentLoader` (`PictureDescriptionApiOptions`) | `OLLAMA_INDEX_URL` | `POST /v1/chat/completions` | `VLM_MODEL` |
+| Document conversion (JSON/MD) | `DocumentLoader._convert_file()` | `DOCLING_URL` | `POST /v1/convert/file` | `DOCLING_URL` |
+| VLM image pass (classification/structured) | `DocumentLoader._ollama_vision()` | `OLLAMA_INDEX_URL` | `POST /api/generate` | `VLM_MODEL` |
+| Vision synthesis + table narration | `DocumentLoader._ollama_text()` | `OLLAMA_INDEX_URL` | `POST /api/generate` | `INDEX_MODEL` (fallback `VLM_MODEL`) |
 | Chunk embedding (index) | `OllamaEmbedder.embed()` | `OLLAMA_INDEX_URL` | `POST /api/embed` | `EMBEDDING_MODEL` |
 | LLM triple extraction | `LLMExtractor` / `HybridExtractor` | `OLLAMA_INDEX_URL` | `POST /api/chat` | `EXTRACT_MODEL` |
 | Query embedding (retrieval) | `OllamaEmbeddings.embed_query()` (langchain-ollama) | `OLLAMA_CHAT_URL` | `POST /api/embeddings` | `EMBEDDING_MODEL` |
@@ -601,8 +599,11 @@ Key environment variables:
 | :--- | :--- |
 | `OLLAMA_INDEX_URL` | Ollama server for indexing (embeddings, VLM, LLM extraction) |
 | `OLLAMA_CHAT_URL` | Ollama server for query-time embeddings and chat |
+| `DOCLING_URL` | docling-serve base URL for document conversion |
 | `EMBEDDING_MODEL` | Model used for both index-time and query-time embeddings |
 | `VLM_MODEL` | Vision-language model for picture descriptions |
+| `INDEX_MODEL` | Text model for table narration and vision synthesis fallback |
+| `INDEX_TEMPERATURE` | Temperature for non-vision indexing LLM calls |
 | `CHAT_MODEL` | LLM for final answer generation |
 | `EXTRACT_MODEL` | LLM for graph triple extraction (LLM/hybrid extractor) |
 | `GRAPH_EXTRACTOR` | Extractor type: `spacy`, `llm`, or `hybrid` (default) |
@@ -610,6 +611,12 @@ Key environment variables:
 | `GRAPH_CHUNK_OVERLAP` | Overlap between chunks (default 80) |
 | `TOP_K` | Default number of vector search results (default 5) |
 | `VLM_TIMEOUT` | HTTP timeout in seconds for VLM calls (default 180) |
+| `TABLE_CHUNK_SIZE` | Max chars for one narrated table part (`0` = no split) |
+| `ENABLE_MASSIVE_TABLE_STRATEGY` | Enable massive-table serialization path |
+| `MASSIVE_ENTITY_METRICS_PER_CHUNK` | Max metrics per `entity_profile` chunk |
+| `MASSIVE_COMPARISON_WINDOW` | Entity columns per `table_comparison` chunk |
+| `MASSIVE_COMPARISON_OVERLAP` | Overlap between comparison windows |
+| `MASSIVE_COMPARISON_MAX_METRICS` | Max metric rows per comparison chunk |
 
 ---
 
@@ -621,7 +628,7 @@ SOURCE FILE                  PIPELINE                     OUTPUT / INDEX
 ./data/{coll}/foo.pdf
 ./data/{coll}/bar.xlsx  ──▶  DocumentLoader               ragdata/{coll}/embedded/
 ./data/{coll}/img.png        (Docling convert              {stem}.embedded.json
-./data/{coll}/audio.mp3       → markdown chunks)
+./data/{coll}/audio.mp3       → 5-stage or passthrough chunks)
                                    │
                           ┌────────┴────────┐
                           ▼                 ▼
@@ -640,7 +647,7 @@ SOURCE FILE                  PIPELINE                     OUTPUT / INDEX
                    index_flags.json
 ```
 
-Docling converts every input format to Markdown before chunking. Tables are rendered as pipe-delimited Markdown; embedded images are replaced by VLM-generated description text inline in the chunk.
+Not all inputs follow a single markdown-only path anymore. CSV/XLSX and rich documents go through structured 5-stage processing, while passthrough formats use docling-serve markdown conversion + simple split.
 
 ---
 
@@ -648,11 +655,10 @@ Docling converts every input format to Markdown before chunking. Tables are rend
 
 | Condition | Handler | Effect on pipeline |
 | :--- | :--- | :--- |
-| VLM picture description fails / times out | Docling logs warning, inserts placeholder text | Indexing continues with partial content |
-| Docling layout/OCR models not cached | Auto-downloaded on first `DocumentConverter()` call (~1 GB) | One-time cold start; bake into Docker with `RUN python -c "from docling.document_converter import DocumentConverter; DocumentConverter()"` |
-| Audio/video on system without ffmpeg | Docling raises `ConversionError` | `load_directory()` logs warning, skips file; file excluded from manifest (retried next run) |
+| VLM stage fails / times out | `DocumentLoader` logs warning and falls back (caption/OCR concat or empty) | Indexing continues with partial vision enrichment |
+| docling-serve unavailable / conversion error | `_convert_file()` raises; `load_directory()` catches and logs per-file warning | File skipped and excluded from manifest (retried next run) |
 | Unsupported file extension | `upload_document` returns HTTP 422 | File rejected at API boundary |
-| File fails to load (Docling error) | `RagIndexer` logs warning, excludes from manifest | File retried on next index call |
+| File fails to load (parse/chunk/convert error) | `RagIndexer` logs warning, excludes from manifest | File retried on next index call |
 | No changes detected (delta) | `RagIndexer.index_documents()` returns immediately | No-op; manifest unchanged |
 | `LanceDBGraphStore` not available (import error) | `run_graph_extraction()` logs warning, returns | Vector indexing proceeds; graph skipped |
 | Ollama server unreachable | Raises connection error | Propagates to caller; task status set to `"error"` |

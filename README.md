@@ -11,6 +11,7 @@ A hybrid **Retrieval-Augmented Generation (RAG)** system that combines a local k
 - **Self-RAG** — optional reflection loop that gates retrieval, filters irrelevant chunks, checks answer grounding, and automatically refines the query when grounding fails
 - **Multi-collection** — manage independent document collections via a REST API
 - **Rich document ingestion** — powered by [Docling](https://github.com/DS4SD/docling); supports documents (`.pdf`, `.docx`, `.xlsx`, `.pptx`, `.md`, `.tex`, `.html`, `.csv`, and more), images (`.png`, `.jpg`, `.jpeg`, `.tiff`, `.bmp`, `.webp`), audio (`.wav`, `.mp3`, `.m4a`, `.aac`, `.ogg`, `.flac`), and video (`.mp4`, `.avi`, `.mov`); embedded pictures are described inline by a VLM via Docling's built-in picture-description pipeline
+- **Massive-table strategy (optional)** — when `ENABLE_MASSIVE_TABLE_STRATEGY=1`, wide/transposed tables are serialized as `entity_profile` and `table_comparison` chunks with `table_strategy=massive_entity_profile` metadata for retrieval tuning
 - **Incremental indexing** — SHA-256 content-hash delta detection; only new or modified files are reprocessed
 - **Rebuild from cache** — re-populate LanceDB from cached `embedded.json` files without re-parsing or re-embedding
 - **Streaming responses** — optional SSE token-by-token streaming on query endpoints
@@ -133,6 +134,16 @@ INDEX_MODEL=
 
 # Optional: temperature for non-vision indexing LLM calls (table narration, synthesis helpers)
 INDEX_TEMPERATURE=0.1
+
+# Optional: split very large table markdown before narration (0 disables split)
+TABLE_CHUNK_SIZE=0
+
+# Optional: massive-table strategy (off by default)
+ENABLE_MASSIVE_TABLE_STRATEGY=0
+MASSIVE_ENTITY_METRICS_PER_CHUNK=40
+MASSIVE_COMPARISON_WINDOW=4
+MASSIVE_COMPARISON_OVERLAP=1
+MASSIVE_COMPARISON_MAX_METRICS=36
 ```
 
 > If you only have one Ollama instance, set both `OLLAMA_INDEX_URL` and `OLLAMA_CHAT_URL` to the same URL.
