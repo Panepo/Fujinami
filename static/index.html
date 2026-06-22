@@ -1077,19 +1077,6 @@
             <div id="graphrag-context-box" class="graphrag-box"></div>
           </div>
         </details>
-        <details id="sources-detail" style="display:none">
-          <summary>Sources</summary>
-          <table id="tbl-sources" style="margin-top:6px">
-            <thead>
-              <tr>
-                <th>Doc</th>
-                <th>Chunk</th>
-                <th>Excerpt</th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
-        </details>
       </section>
 
     </main>
@@ -1679,8 +1666,6 @@
       $('rewrite-preview').innerHTML = '';
       $('think-detail').style.display = 'none';
       $('think-box').textContent = '';
-      $('sources-detail').style.display = 'none';
-      $('tbl-sources').querySelector('tbody').innerHTML = '';
       clearContextPanel();
 
       const btnAsk = $('btn-ask');
@@ -1712,7 +1697,6 @@
         showQueryStats(totalMs, totalMs, words);
         if (res.sources && res.sources.length > 0) {
           renderContextChunks(res.sources);
-          renderSources(res.sources);
         }
         // For graph-only method the answer IS the graph context — skip duplicate display
         if (res.graphrag_context && method !== 'graph') {
@@ -1778,7 +1762,6 @@
       let answer = '';
       let thinkText = '';
       let firstTokenMs = null;
-      let streamedSources = [];
       const box = $('answer-box');
       box.textContent = '';
 
@@ -1851,8 +1834,6 @@
               try { renderContextChunks(JSON.parse(data)); } catch (_) { }
             } else if (eventType === 'graphrag') {
               if (method !== 'graph') { try { renderGraphragContext(JSON.parse(data)); } catch (_) { } }
-            } else if (eventType === 'sources') {
-              try { streamedSources = JSON.parse(data); renderSources(streamedSources); } catch (_) { }
             } else if (eventType === 'rewrite_meta') {
               try { renderRewriteMeta(JSON.parse(data)); } catch (_) { }
             } else if (eventType === 'node_enter') {
@@ -1927,17 +1908,6 @@
         if (badgeGraph) badgeGraph.style.display = 'none';
         if (box) box.classList.add('skip');
       }
-    }
-
-    function renderSources(sources) {
-      const tbody = $('tbl-sources').querySelector('tbody');
-      tbody.innerHTML = sources.map(s => `
-    <tr>
-      <td>${s.doc_id}</td>
-      <td>${s.chunk_index}</td>
-      <td>${s.excerpt}</td>
-    </tr>`).join('');
-      $('sources-detail').style.display = '';
     }
 
     function renderRewriteMeta(meta) {
