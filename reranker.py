@@ -60,7 +60,6 @@ class LocalReranker:
         self._max_candidates = max_candidates if max_candidates is not None else _RERANKER_MAX_CANDIDATES
 
         self._model: Any | None = None
-        self._load_error: Exception | None = None
 
     @property
     def enabled(self) -> bool:
@@ -106,14 +105,38 @@ class LocalReranker:
             return False
         if self._model is not None:
             return True
-        if self._load_error is not None:
-            return False
+        # Do not cache load errors permanently — allow retry on the next request
+        # so that a corrected environment (e.g. after dependency install) takes
+        # effect without a full process restart.
 
         try:
+            import inspect  # noqa: PLC0415
+
             from sentence_transformers import CrossEncoder  # noqa: PLC0415
 
             device = self._resolve_device()
-            self._model = CrossEncoder(self._model_name, device=device)
+
+            # Newer transformers + accelerate versions load models with meta tensors
+            # by default, which breaks CrossEncoder's internal .to(device) call.
+            # Passing device_map=None via model_kwargs / automodel_args prevents this.
+            _ce_params = inspect.signature(CrossEncoder.__init__).parameters
+            if "model_kwargs" in _ce_params:
+                # sentence-transformers >= 3.x
+                self._model = CrossEncoder(
+                    self._model_name,
+                    device=device,
+                    model_kwargs={"device_map": None},
+                )
+            elif "automodel_args" in _ce_params:
+                # sentence-transformers 2.x
+                self._model = CrossEncoder(
+                    self._model_name,
+                    device=device,
+                    automodel_args={"device_map": None},
+                )
+            else:
+                self._model = CrossEncoder(self._model_name, device=device)
+
             logger.info(
                 "Reranker loaded: model=%s device=%s batch_size=%s",
                 self._model_name,
@@ -122,7 +145,6 @@ class LocalReranker:
             )
             return True
         except Exception as exc:
-            self._load_error = exc
             logger.warning("Reranker unavailable, fallback to ANN ordering: %s", exc)
             return False
 
