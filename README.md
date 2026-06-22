@@ -9,6 +9,7 @@ A hybrid **Retrieval-Augmented Generation (RAG)** system that combines a local k
 - **Hybrid search** — blends dense vector search (LanceDB) with local knowledge-graph retrieval (`graph_engine`) for richer answers
 - **Three query modes** — `vector`, `hybrid`, and `graph` (entity/relationship context)
 - **Self-RAG** — optional reflection loop that gates retrieval, filters irrelevant chunks, checks answer grounding, and automatically refines the query when grounding fails
+- **Local reranker** — optional cross-encoder re-scoring of retrieved chunks so the most relevant passages are presented to the LLM first; default-off, toggled by `ENABLE_RERANKER`
 - **Multi-collection** — manage independent document collections via a REST API
 - **Rich document ingestion** — powered by [Docling](https://github.com/DS4SD/docling); supports documents (`.pdf`, `.docx`, `.xlsx`, `.pptx`, `.md`, `.tex`, `.html`, `.csv`, and more), images (`.png`, `.jpg`, `.jpeg`, `.tiff`, `.bmp`, `.webp`), audio (`.wav`, `.mp3`, `.m4a`, `.aac`, `.ogg`, `.flac`), and video (`.mp4`, `.avi`, `.mov`); embedded pictures are described inline by a VLM via Docling's built-in picture-description pipeline
 - **Massive-table strategy (optional)** — when `ENABLE_MASSIVE_TABLE_STRATEGY=1`, wide/transposed tables are serialized as `entity_profile` and `table_comparison` chunks with `table_strategy=massive_entity_profile` metadata for retrieval tuning
@@ -144,6 +145,15 @@ MASSIVE_ENTITY_METRICS_PER_CHUNK=40
 MASSIVE_COMPARISON_WINDOW=4
 MASSIVE_COMPARISON_OVERLAP=1
 MASSIVE_COMPARISON_MAX_METRICS=36
+
+# Optional: local cross-encoder reranker (off by default)
+ENABLE_RERANKER=false
+# Path to local model directory (bundled) or a HuggingFace model ID:
+RERANKER_MODEL=./models/reranker/BAAI__bge-reranker-v2-m3
+RERANKER_DEVICE=auto          # auto | cuda | mps | cpu
+RERANKER_BATCH_SIZE=16
+RERANKER_OVERFETCH_FACTOR=3.0 # fetch top_k * factor ANN candidates before reranking
+RERANKER_MAX_CANDIDATES=50    # hard ceiling on candidates fetched for reranking
 ```
 
 > If you only have one Ollama instance, set both `OLLAMA_INDEX_URL` and `OLLAMA_CHAT_URL` to the same URL.
@@ -344,6 +354,49 @@ When `self_rag: true` is set on a query request, the `SelfReflector` wraps the n
 The full step-by-step trace is returned in `self_rag_meta.process_log`.
 
 > **Note:** `self_rag` takes precedence over `stream` when both are `true`. Self-RAG responses are always non-streaming.
+
+---
+
+## Local Reranker
+
+The local reranker re-scores retrieved vector chunks with a cross-encoder model before passing them to the LLM. Unlike a bi-encoder (used for ANN search), a cross-encoder sees the full query–passage pair and produces a more accurate relevance score.
+
+**How it works:**
+1. `_raw_vector_results` overfetches `min(top_k × RERANKER_OVERFETCH_FACTOR, RERANKER_MAX_CANDIDATES)` ANN candidates.
+2. `LocalReranker.rerank()` scores all candidates against the query and sorts descending.
+3. Only the top `top_k` are returned — the LLM sees the same number of chunks as before.
+
+### Enabling
+
+Set `ENABLE_RERANKER=true` in your `.env` (or pass it as an environment variable). The model is loaded lazily on first query.
+
+```env
+ENABLE_RERANKER=true
+RERANKER_MODEL=./models/reranker/BAAI__bge-reranker-v2-m3
+```
+
+The bundled model (`BAAI/bge-reranker-v2-m3`) is checked in under `models/reranker/BAAI__bge-reranker-v2-m3/` and supports mixed Traditional Chinese + English text.
+
+### First-run warmup
+
+On the first query after enabling, the model weights are loaded from disk. Expect a one-time latency spike (typically 1–3 s on CPU, <1 s if a GPU is present). Subsequent queries pay the normal inference cost only (target ≤ 150 ms added latency on GPU; 300–600 ms on CPU for `top_k=5, OVERFETCH_FACTOR=3`).
+
+### Rollback
+
+Set `ENABLE_RERANKER=false` (or remove the variable) and restart. No data migration is needed — the reranker does not modify stored indices.
+
+### Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `ENABLE_RERANKER` | `false` | Enable/disable the reranker |
+| `RERANKER_MODEL` | `BAAI/bge-reranker-v2-m3` | Local path or HuggingFace model ID |
+| `RERANKER_DEVICE` | `auto` | `auto` \| `cuda` \| `mps` \| `cpu` |
+| `RERANKER_BATCH_SIZE` | `16` | Cross-encoder inference batch size |
+| `RERANKER_OVERFETCH_FACTOR` | `3.0` | ANN candidate multiplier (e.g. `5` → fetch 25 for `top_k=5`) |
+| `RERANKER_MAX_CANDIDATES` | `50` | Hard ceiling on ANN candidates fetched |
+
+> **Tip:** Inspect the active reranker configuration at runtime via `GET /api/env`.
 
 ---
 

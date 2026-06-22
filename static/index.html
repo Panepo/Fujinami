@@ -361,6 +361,19 @@
       display: block;
     }
 
+    .reranker-score {
+      display: inline-block;
+      background: #0f3460;
+      color: #e8f0fe;
+      font-size: .72rem;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      padding: 1px 6px;
+      border-radius: 10px;
+      margin-left: 6px;
+      letter-spacing: .02em;
+    }
+
     .graphrag-box {
       background: #fafaf0;
       border: 1px solid #e2d96e;
@@ -1057,7 +1070,7 @@
           </div>
         </details>
         <details id="context-detail" style="display:none;margin-top:10px">
-          <summary>Context sent to LLM</summary>
+          <summary id="context-detail-summary">Context sent to LLM</summary>
           <div id="context-chunks-list" style="margin-top:6px"></div>
           <div id="graphrag-context-wrap" style="display:none;margin-top:10px">
             <p style="font-size:.8rem;font-weight:600;color:#555;margin-bottom:4px">Graph context</p>
@@ -1601,18 +1614,30 @@
       $('graphrag-context-wrap').style.display = 'none';
       $('context-detail').style.display = 'none';
       $('context-detail').open = false;
+      const summary = $('context-detail-summary');
+      if (summary) summary.textContent = 'Context sent to LLM';
     }
 
     function renderContextChunks(chunks) {
       const list = $('context-chunks-list');
       list.innerHTML = '';
       if (!chunks || chunks.length === 0) return;
+      const hasScores = chunks.some(c => c.reranker_score != null);
+      const summary = $('context-detail-summary');
+      if (summary) {
+        summary.innerHTML = hasScores
+          ? 'Context sent to LLM <span class="reranker-score" style="font-size:.72rem">reranked</span>'
+          : 'Context sent to LLM';
+      }
       chunks.forEach((c, i) => {
         const item = document.createElement('div');
         item.className = 'chunk-item';
+        const scoreBadge = hasScores && c.reranker_score != null
+          ? `<span class="reranker-score" title="Reranker score">${c.reranker_score.toFixed(4)}</span>`
+          : '';
         item.innerHTML = `
       <div class="chunk-header" onclick="this.parentElement.classList.toggle('open')">
-        <span>#${i + 1} — ${c.doc_id} &nbsp;<span style="font-weight:400;color:#64748b">(chunk ${c.chunk_index})</span></span>
+        <span>#${i + 1} — ${c.doc_id} &nbsp;<span style="font-weight:400;color:#64748b">(chunk ${c.chunk_index})</span>${scoreBadge}</span>
         <span style="color:#94a3b8;font-size:.78rem">${c.full_text ? c.full_text.length : c.excerpt.length} chars ▾</span>
       </div>
       <div class="chunk-body">${escHtml(c.full_text || c.excerpt)}</div>`;

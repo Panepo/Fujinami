@@ -107,6 +107,11 @@ class RagRetriever:
             self._table = None
             logger.info("LanceDB table '%s' not yet created", _TABLE_NAME)
 
+        # --- Reranker setup (lazy model load, no-op when disabled) ---
+        from reranker import LocalReranker  # noqa: PLC0415
+
+        self._reranker = LocalReranker()
+
     # ------------------------------------------------------------------
     # Lazy table accessor
     # ------------------------------------------------------------------
@@ -216,6 +221,15 @@ class RagRetriever:
         vector = await asyncio.to_thread(
             self._query_embedding_service.embed_query, query
         )
+        if self._reranker.enabled:
+            fetch_k = min(
+                max(top_k, int(top_k * self._reranker.overfetch_factor)),
+                self._reranker.max_candidates,
+            )
+            rows = self._table.search(vector).limit(fetch_k).to_list()
+            return await asyncio.to_thread(
+                self._reranker.rerank, query, rows, top_k
+            )
         return self._table.search(vector).limit(top_k).to_list()
 
     async def _raw_vector_results_from_embedding(
@@ -224,6 +238,15 @@ class RagRetriever:
         """Return raw LanceDB rows using a pre-computed *embedding* vector (e.g. from HyDE)."""
         if not self._ensure_table():
             return []
+        if self._reranker.enabled:
+            # HyDE path: we don't have the original query text here, so skip reranking
+            # to avoid silently degrading quality; reranking happens only when query text
+            # is available (i.e., _raw_vector_results).
+            fetch_k = min(
+                max(top_k, int(top_k * self._reranker.overfetch_factor)),
+                self._reranker.max_candidates,
+            )
+            return self._table.search(embedding).limit(fetch_k).to_list()[:top_k]
         return self._table.search(embedding).limit(top_k).to_list()
 
     def _graph_context(self, query: str) -> str:

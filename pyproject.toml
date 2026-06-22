@@ -25,6 +25,7 @@ dependencies = [
     "langchain-core",
     "langchain-ollama",
     "ollama>=0.6.0",
+    "sentence-transformers",
 ]
 
 [tool.uv]

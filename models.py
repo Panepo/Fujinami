@@ -68,6 +68,7 @@ class SourceChunk(BaseModel):
     chunk_index: int
     excerpt: str
     full_text: str = ""
+    reranker_score: float | None = None
 
 
 class SelfRagStep(BaseModel):

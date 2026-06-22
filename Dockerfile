@@ -37,7 +37,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /install /usr/local
 
 # Copy application source
-COPY api.py models.py rag_service.py retriever.py document_loader.py rewriter.py self_reflector.py __init__.py ./
+COPY api.py models.py rag_service.py retriever.py reranker.py document_loader.py rewriter.py self_reflector.py __init__.py ./
 COPY models/ ./models/
 COPY indexer/ ./indexer/
 COPY graph_engine/ ./graph_engine/
@@ -63,6 +63,12 @@ ENV PYTHONUNBUFFERED=1 \
   GRAPH_CHUNK_SIZE=400 \
   GRAPH_CHUNK_OVERLAP=80 \
   ENABLE_MASSIVE_TABLE_STRATEGY=1 \
+  ENABLE_RERANKER=false \
+  RERANKER_MODEL=/app/models/reranker/BAAI__bge-reranker-v2-m3 \
+  RERANKER_OVERFETCH_FACTOR=3.0 \
+  RERANKER_MAX_CANDIDATES=50 \
+  RERANKER_DEVICE=auto \
+  RERANKER_BATCH_SIZE=16 \
   TOP_K=5
 
 EXPOSE 8000

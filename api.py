@@ -687,6 +687,7 @@ async def query_collection(name: str, body: QueryRequest):
                     chunk_index=meta_dict.get("chunk_index", 0),
                     excerpt=row.get("text", "")[:200],
                     full_text=row.get("text", ""),
+                    reranker_score=row.get("_reranker_score"),
                 )
             )
 
@@ -706,6 +707,7 @@ async def query_collection(name: str, body: QueryRequest):
                     chunk_index=meta.get("chunk_index", 0),
                     excerpt=row.get("text", "")[:200],
                     full_text=row.get("text", ""),
+                    reranker_score=row.get("_reranker_score"),
                 )
             )
 
@@ -806,6 +808,13 @@ _ENV_VARS: list[dict] = [
     {"key": "EXTRACT_MODEL",     "default": "",          "description": "Model used by the LLM graph extractor"},
 
     {"key": "OLLAMA_TIMEOUT",    "default": "1800",      "description": "Timeout (s) for Ollama API calls"},
+
+    {"key": "ENABLE_RERANKER",           "default": "false",                              "description": "Enable local cross-encoder reranker (requires sentence-transformers)"},
+    {"key": "RERANKER_MODEL",            "default": "BAAI/bge-reranker-v2-m3",            "description": "Path or HuggingFace model ID for the reranker"},
+    {"key": "RERANKER_OVERFETCH_FACTOR", "default": "3.0",                                "description": "ANN candidate multiplier when reranker is active"},
+    {"key": "RERANKER_MAX_CANDIDATES",   "default": "50",                                 "description": "Hard ceiling on ANN candidates fetched for reranking"},
+    {"key": "RERANKER_DEVICE",           "default": "auto",                               "description": "Reranker compute device: auto | cuda | mps | cpu"},
+    {"key": "RERANKER_BATCH_SIZE",       "default": "16",                                 "description": "Reranker inference batch size"},
 ]
 
 
