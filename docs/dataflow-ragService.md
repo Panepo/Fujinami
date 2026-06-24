@@ -24,7 +24,16 @@
 │               ┌──────────────────┐  ┌──────────────────────┐  │
 │               │  RagIndexer      │  │  RagRetriever        │  │
 │               │  (indexer/)      │  │  (retriever.py)      │  │
-│               └────────┬─────────┘  └──────────┬───────────┘  │
+│               └────────┬─────────┘  └──────┬────────────────┘  │
+│                        │                   │                  │
+│                        │           ┌───────┴────────────────┐ │
+│                        │           │                       │ │
+│                        │           ▼                       ▼ │
+│                        │    ┌──────────────┐  ┌──────────────┐│
+│                        │    │  QueryRewriter  │  │LocalReranker ││
+│                        │    │  (rewriter.py)  │  │(reranker.py) ││
+│                        │    │ (pre-process)  │  │(post-filter) ││
+│                        │    └──────────────┘  └──────────────┘│
 │                        │                       │               │
 │                        │            ┌──────────┴────────────┐  │
 │                        │            │  SelfReflector        │  │
@@ -230,6 +239,18 @@ GraphPipeline.run(text, source_doc)
 
 ## 3. Query Pipeline (Read Path)
 
+### 3.0 Query Rewriting (Optional Pre-processing)
+
+When `rewrite` parameter is set in the query request, `QueryRewriter` applies one of three LLM-based query transformation strategies:
+
+| Mode | Behavior | Use case |
+| :--- | :--- | :--- |
+| `hyde` | Generate hypothetical document that answers the query, embed it, use vector for search | Improves semantic matching for complex questions |
+| `multi_query` | Generate N alternative phrasings of the query in parallel | Improves coverage for multi-faceted questions |
+| `step_back` | Broaden query to a higher-level concept | Helps find broader context before narrowing |
+
+Rewriting happens **before** vector/graph retrieval. The rewritten query (or hypothetical document embedding for HyDE) is then used in the normal retrieval flow. Metadata about the rewriting operation is returned in `QueryResponse.rewrite_meta`.
+
 ### 3.1 `hybrid_search(query)`
 
 ```
@@ -286,6 +307,11 @@ User query string
 ```
 User query string
        │
+       ├─ rewrite parameter set?
+       │  ├─ Yes: QueryRewriter.rewrite(query, mode)
+       │  │       (metadata stored for response)
+       │  └─ No: use query as-is
+       │
        ▼
 OllamaEmbeddings.embed_query()  (langchain-ollama)
   model: EMBEDDING_MODEL
@@ -295,11 +321,20 @@ OllamaEmbeddings.embed_query()  (langchain-ollama)
   query_vector
        │
        ├─── ANN search (cosine)
+       │    Fetch overfetch_factor * top_k candidates if reranker enabled
        │    LanceDB ./ragdata/{coll}/lancedb/  table: "documents"
        │    .search(query_vector).limit(TOP_K).to_list()
        │           │
        │           ▼
-       │    top-k vector rows  {id, doc_id, text, vector, metadata}
+       │    candidate rows  {id, doc_id, text, vector, metadata}
+       │
+       ├─── Reranking (if ENABLE_RERANKER=true)
+       │    LocalReranker.rerank(query, candidates, top_k)
+       │    Cross-encoder scoring → sorted by relevance
+       │    Each chunk augmented with reranker_score
+       │           │
+       │           ▼
+       │    reranked top-k rows
        │
        └─── Title-keyword match  (_title_search_results)
             Scan all rows; keep those whose section_title contains
@@ -323,6 +358,11 @@ ChatOllama.ainvoke()  (CHAT_MODEL, OLLAMA_CHAT_URL)
 
 ```
 User query string
+       │
+       ├─ rewrite parameter set?
+       │  ├─ Yes: QueryRewriter.rewrite(query, mode)
+       │  │       (metadata stored for response)
+       │  └─ No: use query as-is
        │
        ▼
 _graph_context(query)   — three cascading strategies
@@ -479,7 +519,7 @@ The FastAPI server exposes the following endpoints. All collection-scoped routes
 
 | Method | Path | Body | Description |
 | :--- | :--- | :--- | :--- |
-| `POST` | `/collections/{name}/query` | `{query, method?, top_k?, stream?, self_rag?}` | Query collection. Returns `QueryResponse` or SSE stream |
+| `POST` | `/collections/{name}/query` | `{query, method?, top_k?, stream?, self_rag?, rewrite?}` | Query collection. Returns `QueryResponse` or SSE stream |
 
 `method` values: `vector` · `graph` · `hybrid` (default).
 `self_rag: true` activates the Self-RAG reflection loop; response includes `self_rag_meta`. Takes precedence over `stream`.
@@ -503,6 +543,7 @@ Returns `409` if `index_status == "new_docs"`.
 | `top_k` | `int` | `5` | Max vector chunks to retrieve |
 | `stream` | `bool` | `false` | Return SSE stream (ignored when `self_rag=true`) |
 | `self_rag` | `bool` | `false` | Activate Self-RAG reflection loop |
+| `rewrite` | `"hyde"` \| `"multi_query"` \| `"step_back"` \| `null` | `null` | Optional query rewriting strategy |
 
 **`QueryResponse`**
 
@@ -514,6 +555,26 @@ Returns `409` if `index_status == "new_docs"`.
 | `sources` | `list[SourceChunk]` \| `null` | Retrieved chunks (null for graph-only) |
 | `graphrag_context` | `string` \| `null` | Graph context string (hybrid/graph only) |
 | `self_rag_meta` | `SelfRagMeta` \| `null` | Populated only when `self_rag=true` |
+| `rewrite_meta` | `RewriteMeta` \| `null` | Query rewriting metadata (populated when `rewrite` is used) |
+
+**`SourceChunk`**
+
+| Field | Type | Notes |
+| :--- | :--- | :--- |
+| `doc_id` | `string` | Source filename |
+| `chunk_index` | `int` | Chunk position in document |
+| `excerpt` | `string` | Chunk text preview |
+| `full_text` | `string` | Complete chunk text (default empty) |
+| `reranker_score` | `float` \| `null` | Cross-encoder relevance score (null if reranker disabled) |
+
+**`RewriteMeta`**
+
+| Field | Type | Notes |
+| :--- | :--- | :--- |
+| `mode` | `string` | Rewriting mode: `"hyde"`, `"multi_query"`, or `"step_back"` |
+| `original_query` | `string` | The original user query before rewriting |
+| `rewritten_queries` | `list[string]` | All queries used for retrieval (original + rewrites) |
+| `hypothetical_document` | `string` \| `null` | Generated hypothetical document (HyDE mode only) |
 
 **`SelfRagMeta`**
 
@@ -617,10 +678,85 @@ Key environment variables:
 | `MASSIVE_COMPARISON_WINDOW` | Entity columns per `table_comparison` chunk |
 | `MASSIVE_COMPARISON_OVERLAP` | Overlap between comparison windows |
 | `MASSIVE_COMPARISON_MAX_METRICS` | Max metric rows per comparison chunk |
+| `ENABLE_RERANKER` | Enable local cross-encoder reranking (default `false`) |
+| `RERANKER_MODEL` | Cross-encoder model name (default `BAAI/bge-reranker-v2-m3`) |
+| `RERANKER_DEVICE` | Device for reranker inference: `cuda`, `mps`, `cpu`, or `auto` (default `auto`) |
+| `RERANKER_BATCH_SIZE` | Batch size for reranker forward passes (default `16`) |
+| `RERANKER_OVERFETCH_FACTOR` | ANN candidate multiplier when reranker is active (default `3.0`) |
+| `RERANKER_MAX_CANDIDATES` | Hard ceiling on ANN candidates fetched (default `50`) |
 
 ---
 
-## 7. File Lifecycle
+## 7. Reranker Architecture
+
+### 7.0 When Reranking is Active
+
+If `ENABLE_RERANKER=true`, the retrieval path changes:
+
+1. **Overfetch**: ANN search fetches `RERANKER_OVERFETCH_FACTOR × top_k` candidates (default: 3× top_k)
+   - Capped at `RERANKER_MAX_CANDIDATES` (default 50)
+   - Reduces risk of filtering out relevant documents
+
+2. **Rerank**: `LocalReranker.rerank(query, candidates, top_k)` scores all candidates using a cross-encoder
+   - Model: `RERANKER_MODEL` (default: `BAAI/bge-reranker-v2-m3`)
+   - Device: auto-detected from `RERANKER_DEVICE` (defaults to GPU if available, CPU fallback)
+   - Batch processing: `RERANKER_BATCH_SIZE` queries per forward pass
+
+3. **Sort & Return**: Top-k candidates sorted by reranker score, each augmented with `reranker_score` field in `SourceChunk`
+
+### 7.1 Reranker Configuration
+
+```python
+LocalReranker(enabled=True/False, model_name="...", device="auto",
+              batch_size=16, overfetch_factor=3.0, max_candidates=50)
+```
+
+- **Lazy loading**: Model is loaded on first inference call, not at initialization
+- **Idempotent**: Safe to check `.enabled` and `.is_ready` properties without side effects
+- **Device fallback**: Auto-detects GPU (CUDA/MPS) with CPU fallback if unavailable
+
+---
+
+## 8. QueryRewriter Architecture
+
+### 8.0 Rewriting Strategies
+
+**HyDE (Hypothetical Document Embeddings)**
+- Generates a short factual passage that would answer the query
+- Embeds the hypothetical document instead of the query
+- Returns the hypothetical document embedding for ANN search
+- Best for: Complex reasoning questions, multi-step queries
+
+**Multi-query**
+- Generates N alternative phrasings of the query
+- Runs vector search on all phrasings in parallel
+- Merges and deduplicates results
+- Best for: Paraphrasing-sensitive queries, diverse vocabulary
+
+**Step-back**
+- Generalizes the query to a broader, higher-level question
+- Runs search with both original and generalized query
+- Combines results for better coverage
+- Best for: Queries needing broader context before narrowing
+
+### 8.1 Rewriter Usage Flow
+
+```
+QueryRewriter instance (created per-request in api.py)
+  ↓ reuse existing ChatOllama + OllamaEmbeddings from RagRetriever
+  ↓ rewrite(query, mode) dispatches to appropriate strategy
+  ↓ generates metadata (RewriteMeta) for response inclusion
+  ↓ returns either rewritten_queries[] or hyde_embedding
+  ↓ original retriever continues with transformed input
+```
+
+- **Stateless**: Each rewrite call is independent; no session state
+- **Fallback**: If LLM call fails, falls back gracefully to original query
+- **Transparent**: Full rewrite history returned in `QueryResponse.rewrite_meta`
+
+---
+
+## 9. File Lifecycle
 
 ```
 SOURCE FILE                  PIPELINE                     OUTPUT / INDEX
@@ -651,7 +787,7 @@ Not all inputs follow a single markdown-only path anymore. CSV/XLSX and rich doc
 
 ---
 
-## 8. Error and Skip Behaviour
+## 10. Error and Skip Behaviour
 
 | Condition | Handler | Effect on pipeline |
 | :--- | :--- | :--- |
