@@ -139,9 +139,9 @@ class RagService:
         """Return graph context for *query*. Delegates to :class:`RagRetriever`."""
         return await asyncio.to_thread(self._retriever._graph_context, query)
 
-    async def _generate_response(self, query: str, context: str) -> str:
-        """Generate a response for *query* given *context*. Delegates to :class:`RagRetriever`."""
-        return await self._retriever._generate_response(query, context)
+    async def _generate_response(self, query: str, context: str, image_base64: str | None = None) -> str:
+        """Generate a response for *query* given *context* and optional image. Delegates to :class:`RagRetriever`."""
+        return await self._retriever._generate_response(query, context, image_base64)
 
     @property
     def _chat_service(self):

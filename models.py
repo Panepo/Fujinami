@@ -61,6 +61,7 @@ class QueryRequest(BaseModel):
     stream: bool = False
     self_rag: bool = False
     rewrite: Literal["hyde", "multi_query", "step_back"] | None = None
+    image_base64: str | None = None  # Base64-encoded image data (optional)
 
 
 class SourceChunk(BaseModel):
@@ -95,6 +96,7 @@ class QueryResponse(BaseModel):
     graphrag_context: str | None = None
     self_rag_meta: Optional[SelfRagMeta] = None
     rewrite_meta: Optional[RewriteMeta] = None
+    image_used: bool = False  # Indicates image was processed with query
 
 
 class DocumentChunk(BaseModel):

@@ -40,3 +40,4 @@ class QueryState(TypedDict, total=False):
     answer: str
     iterations: int
     node_trace: list[dict]  # [{node, started_at, duration_ms, detail}]
+    image_base64: str  # Base64-encoded image data (optional)

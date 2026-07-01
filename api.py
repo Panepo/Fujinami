@@ -580,12 +580,27 @@ async def _stream_answer_inner(
         t_ga = time.time()
         yield f"event: node_enter\ndata: {json.dumps({'node': 'generate_answer', 'timestamp': t_ga})}\n\n"
 
+        # Build human message with optional image
+        if query_req.image_base64:
+            human_content = [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": query_req.image_base64},
+                },
+                {
+                    "type": "text",
+                    "text": f"Context:\n{context}\n\nQuestion: {query_req.query}",
+                },
+            ]
+        else:
+            human_content = f"Context:\n{context}\n\nQuestion: {query_req.query}"
+
         messages = [
             SystemMessage(content=(
                 "You are a helpful assistant. Answer the user's question using only "
                 "the provided context. If the context does not contain enough information, say so."
             )),
-            HumanMessage(content=f"Context:\n{context}\n\nQuestion: {query_req.query}"),
+            HumanMessage(content=human_content),
         ]
 
         async for chunk in rag._chat_service.astream(messages):
@@ -725,7 +740,7 @@ async def query_collection(name: str, body: QueryRequest):
 
     # Non-streaming path — generate answer from pre-fetched context
     if body.method == "vector":
-        answer = await rag._generate_response(body.query, vector_context or "")
+        answer = await rag._generate_response(body.query, vector_context or "", body.image_base64)
     elif body.method == "graph":
         answer = graphrag_context or ""
     else:  # hybrid
@@ -735,7 +750,7 @@ async def query_collection(name: str, body: QueryRequest):
         if graphrag_context:
             parts.append(f"Graph Search Results:\n{graphrag_context}")
         merged = "\n\n".join(parts)
-        answer = await rag._generate_response(body.query, merged)
+        answer = await rag._generate_response(body.query, merged, body.image_base64)
 
     return QueryResponse(
         collection=name,
@@ -744,6 +759,7 @@ async def query_collection(name: str, body: QueryRequest):
         sources=sources,
         graphrag_context=graphrag_context,
         rewrite_meta=rewrite_meta,
+        image_used=body.image_base64 is not None,
     )
 
 

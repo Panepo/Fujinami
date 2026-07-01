@@ -999,6 +999,19 @@
         </div>
         <label style="font-size:.82rem;margin-top:10px;display:block">Query</label>
         <textarea id="inp-query" placeholder="Ask a question…"></textarea>
+        <div style="margin-top:10px;padding:10px;background:#f8f9fa;border:1px solid #dee2e6;border-radius:4px">
+          <label style="font-size:.82rem;display:block;margin-bottom:6px">Upload Image (Optional)</label>
+          <input type="file" id="image-input" accept="image/*" style="margin-bottom:8px" />
+          <div id="image-preview-container" style="display:none;margin-top:8px">
+            <img id="image-preview" alt="Selected image preview"
+              style="max-width:200px;max-height:200px;border-radius:4px;margin-bottom:8px;border:1px solid #ccc" />
+            <div style="display:flex;gap:6px;align-items:center">
+              <button type="button" class="btn-danger" id="clear-image-btn" onclick="clearImageUpload()"
+                style="padding:4px 10px;font-size:.8rem">Clear Image</button>
+              <span id="image-info" style="font-size:.75rem;color:#666"></span>
+            </div>
+          </div>
+        </div>
         <div class="form-row" style="margin-top:8px">
           <div style="flex:1">
             <label>Method</label>
@@ -1645,6 +1658,61 @@
       return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
 
+    // -----------------------------------------------------------------------
+    // Image Upload Handling
+    // -----------------------------------------------------------------------
+
+    let currentImageBase64 = null;
+
+    // Initialize image input listener
+    (() => {
+      const imageInput = document.getElementById('image-input');
+      if (imageInput) {
+        imageInput.addEventListener('change', handleImageSelection);
+      }
+    })();
+
+    function handleImageSelection(event) {
+      const file = event.target.files[0];
+      if (!file) {
+        clearImageUpload();
+        return;
+      }
+
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        currentImageBase64 = e.target.result;  // This is a data URI: data:image/png;base64,...
+        const preview = document.getElementById('image-preview');
+        const previewContainer = document.getElementById('image-preview-container');
+        const imageInfo = document.getElementById('image-info');
+
+        preview.src = currentImageBase64;
+        previewContainer.style.display = 'block';
+
+        // Display file info
+        const sizeMB = (file.size / (1024 * 1024)).toFixed(2);
+        imageInfo.textContent = `${file.name} (${sizeMB} MB)`;
+      };
+
+      reader.onerror = () => {
+        alert('Error reading image file');
+        clearImageUpload();
+      };
+
+      reader.readAsDataURL(file);
+    }
+
+    function clearImageUpload() {
+      currentImageBase64 = null;
+      const imageInput = document.getElementById('image-input');
+      const previewContainer = document.getElementById('image-preview-container');
+      const preview = document.getElementById('image-preview');
+
+      if (imageInput) imageInput.value = '';
+      previewContainer.style.display = 'none';
+      preview.src = '';
+    }
+
     async function submitQuery() {
       const col = $('sel-qry-col').value;
       const query = $('inp-query').value.trim();
@@ -1690,6 +1758,7 @@
       try {
         const body = { query, method, stream: false, self_rag: selfRag };
         if (rewrite) body.rewrite = rewrite;
+        if (currentImageBase64) body.image_base64 = currentImageBase64;
         const res = await api('POST', `/collections/${col}/query`, body);
         const totalMs = Date.now() - _queryStart;
         $('answer-box').textContent = res.answer;
@@ -1772,6 +1841,7 @@
       try {
         const body = { query, method, stream: true };
         if (rewrite) body.rewrite = rewrite;
+        if (currentImageBase64) body.image_base64 = currentImageBase64;
         const resp = await fetch(BASE + `/collections/${col}/query`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },

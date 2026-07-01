@@ -366,17 +366,35 @@ class RagRetriever:
 
         return "\n".join(lines)
 
-    async def _generate_response(self, query: str, context: str) -> str:
-        """Generate a final answer via ChatOllama given *context*."""
+    async def _generate_response(self, query: str, context: str, image_base64: str | None = None) -> str:
+        """Generate a final answer via ChatOllama given *context* and optional image."""
         from langchain_core.messages import HumanMessage, SystemMessage  # noqa: PLC0415
 
+        system_content = (
+            "You are a helpful assistant. Answer the user's question using only "
+            "the provided context. If the context does not contain enough information, "
+            "say so."
+        )
+
+        # Build human message with optional image
+        if image_base64:
+            # image_base64 is a data URI (e.g., "data:image/png;base64,...")
+            human_content = [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": image_base64},
+                },
+                {
+                    "type": "text",
+                    "text": f"Context:\n{context}\n\nQuestion: {query}",
+                },
+            ]
+        else:
+            human_content = f"Context:\n{context}\n\nQuestion: {query}"
+
         messages = [
-            SystemMessage(content=(
-                "You are a helpful assistant. Answer the user's question using only "
-                "the provided context. If the context does not contain enough information, "
-                "say so."
-            )),
-            HumanMessage(content=f"Context:\n{context}\n\nQuestion: {query}"),
+            SystemMessage(content=system_content),
+            HumanMessage(content=human_content),
         ]
         try:
             response = await self._chat_service.ainvoke(messages)
