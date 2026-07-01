@@ -17,6 +17,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from auth_utils import normalize_bearer_token
+
 load_dotenv(Path(__file__).parent / ".env")
 
 logger = logging.getLogger(__name__)
@@ -83,15 +85,24 @@ class RagRetriever:
         # --- langchain-ollama setup ---
         from langchain_ollama import ChatOllama, OllamaEmbeddings  # noqa: PLC0415
 
+        auth_header = normalize_bearer_token(os.environ.get("OLLAMA_BEARER", ""))
+        client_kwargs = (
+            {"headers": {"Authorization": auth_header}}
+            if auth_header
+            else {}
+        )
+
         self._chat_service = ChatOllama(
             model=_CHAT_MODEL,
             base_url=_OLLAMA_CHAT_URL,
             reasoning=_CHAT_MODEL_THINK,
+            client_kwargs=client_kwargs,
         )
         # Query-time embeddings come from the chat server (local, fast)
         self._query_embedding_service = OllamaEmbeddings(
             model=_EMBEDDING_MODEL,
             base_url=_OLLAMA_CHAT_URL,
+            client_kwargs=client_kwargs,
         )
 
         # --- LanceDB setup ---

@@ -189,3 +189,4 @@ models/*
 !.github/reference/*.md
 tests/questions/*
 tests/archive/*
+*secret*

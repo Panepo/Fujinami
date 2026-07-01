@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Optional
 
 import httpx
 import numpy as np
+
+from auth_utils import normalize_bearer_token
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +40,7 @@ class OllamaEmbedder:
         self._base_url = ollama_base_url.rstrip("/")
         self._dimension = dimension
         self._timeout = timeout
+        self._auth_header = normalize_bearer_token(os.environ.get("OLLAMA_BEARER", ""))
 
     def embed(self, texts: list[str]) -> np.ndarray:
         """Embed *texts* and return an L2-normalised float32 array of shape ``(n, dim)``.
@@ -58,6 +62,11 @@ class OllamaEmbedder:
         response = httpx.post(
             f"{self._base_url}/api/embed",
             json={"model": self._model, "input": texts},
+            headers=(
+                {"Authorization": self._auth_header}
+                if self._auth_header
+                else None
+            ),
             timeout=self._timeout,
         )
         response.raise_for_status()

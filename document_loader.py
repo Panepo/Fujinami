@@ -32,6 +32,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from auth_utils import normalize_bearer_token
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -691,6 +693,9 @@ class DocumentLoader:
             or docling_url
             or "http://localhost:5001"
         ).rstrip("/")
+        self._ollama_bearer = normalize_bearer_token(
+            os.environ.get("OLLAMA_BEARER", "")
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -1950,10 +1955,13 @@ class DocumentLoader:
             payload["images"] = [image_b64]
 
         data = json.dumps(payload).encode()
+        headers = {"Content-Type": "application/json"}
+        if self._ollama_bearer:
+            headers["Authorization"] = self._ollama_bearer
         req = urllib.request.Request(
             f"{self._base_url}/api/generate",
             data=data,
-            headers={"Content-Type": "application/json"},
+            headers=headers,
         )
         try:
             with urllib.request.urlopen(req, timeout=self._timeout) as resp:

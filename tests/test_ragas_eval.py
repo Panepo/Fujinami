@@ -10,6 +10,8 @@ from statistics import mean
 import pytest
 from openai import AsyncOpenAI
 
+from auth_utils import normalize_bearer_token
+
 ragas = pytest.importorskip("ragas")
 
 from ragas import EvaluationDataset
@@ -58,6 +60,13 @@ def _ollama_openai_base_url(base_url: str) -> str:
     if normalized.endswith("/v1"):
         return normalized
     return f"{normalized}/v1"
+
+
+def _ollama_api_key_from_env() -> str:
+    bearer = normalize_bearer_token(os.environ.get("OLLAMA_BEARER", ""))
+    if bearer:
+        return bearer[7:].strip()
+    return os.environ.get("OLLAMA_API_KEY", "ollama")
 
 
 _MAX_CONTEXT_CHARS = 1_200   # per retrieved chunk
@@ -123,7 +132,7 @@ def test_ragas_evaluation(pytestconfig: pytest.Config) -> None:
     ollama_chat_url = os.environ["OLLAMA_CHAT_URL"]
     openai_client = AsyncOpenAI(
         base_url=_ollama_openai_base_url(ollama_chat_url),
-        api_key=os.environ.get("OLLAMA_API_KEY", "ollama"),
+        api_key=_ollama_api_key_from_env(),
     )
 
     llm = llm_factory(

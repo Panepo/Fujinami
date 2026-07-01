@@ -1,0 +1,145 @@
+services:
+# --- SCHEDULER SERVICE UPDATED ---
+  scheduler:
+    image: mcuadros/ofelia:latest
+    container_name: php-ofelia
+    command: daemon --docker
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: unless-stopped
+    labels:
+      - "ofelia.job-run.midnight-restart.schedule=0 0 0 * * *"
+      - "ofelia.job-run.midnight-restart.image=docker:cli"
+      - "ofelia.job-run.midnight-restart.volume=/var/run/docker.sock:/var/run/docker.sock"
+      - "ofelia.job-run.midnight-restart.command=docker restart ollama anythingllm nginx docling-serve"
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    pull_policy: always
+    tty: true
+    restart: unless-stopped
+    volumes:
+      - ~/.ollama:/root/.ollama
+    ports:
+      - 8088:11434
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities:
+                - gpu
+
+  docling-serve:
+    image: quay.io/docling-project/docling-serve-cu130:main
+    container_name: docling-serve
+    restart: unless-stopped
+    ports:
+      - "5001:5001"
+    environment:
+      - DOCLING_SERVE_ENABLE_UI=0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities:
+                - gpu
+
+  anythingllm:
+    image: mintplexlabs/anythingllm:latest
+    container_name: anythingllm
+    pull_policy: always
+    volumes:
+      - ./anythingllm-storage:/app/server/storage
+    depends_on:
+      - ollama
+    ports:
+      - 3001:3001
+    environment:
+      - STORAGE_DIR=/app/server/storage
+      - JWT_SECRET=${ANYTHINGLLM_JWT_SECRET}
+      - LLM_PROVIDER=ollama
+      - OLLAMA_BASE_PATH=http://ollama:11434
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    restart: unless-stopped
+
+  etorofu:
+    image: etorofu:latest
+    container_name: etorofu
+    restart: unless-stopped
+    depends_on:
+      - ollama
+    ports:
+      - "8050:8050"
+    volumes:
+      - ./etorofu-data:/data
+    environment:
+      - OLLAMA_URL=http://ollama:11434
+      - OLLAMA_MODEL_FAST=qwen3.5:9b
+      - OLLAMA_MODEL_SMART=qwen3.5:35b
+      - DATABASE_URL=sqlite+aiosqlite:////data/research_data.db
+      - CRON_TOPIC=Latest developments in AI research
+      - CRON_SCHEDULE=23:00
+      - OTEL_SDK_DISABLED=true
+
+  fujinami:
+    image: fujinami:latest
+    container_name: fujinami
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - ollama
+      - docling-serve
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./fujinami-data:/app/data
+      - ./fujinami-ragdata:/app/ragdata
+    environment:
+      - OLLAMA_INDEX_URL=${AI_SERVER_HOST}
+      - OLLAMA_CHAT_URL=${AI_SERVER_HOST}
+      - CHAT_MODEL=nemotron-3-nano:4b
+      - CHAT_MODEL_THINK=true
+      - EMBEDDING_MODEL=embeddinggemma:300m
+      - INDEX_MODEL=granite4.1:8b
+      - CHUNK_SIZE=800
+      - CHUNK_OVERLAP=120
+      - VLM_MODEL=qwen2.5vl:32b
+      - VLM_TIMEOUT=180
+      - VLM_TEMPERATURE=0.2
+      - VLM_SYNTHESIS_TEMPERATURE=0.15
+      - VLM_CAPTION_MAX_TOKENS=100
+      - VLM_STRUCTURED_MAX_TOKENS=3000
+      - VLM_SYNTHESIS_MAX_TOKENS=1500
+      - EXTRACT_MODEL=granite4.1:8b
+      - GRAPH_EXTRACTOR=hybrid
+      - GRAPH_CHUNK_SIZE=400
+      - GRAPH_CHUNK_OVERLAP=80
+      - RAGAS_MODEL=gemma4:31b
+      - TOP_K=5
+      - ENABLE_MASSIVE_TABLE_STRATEGY=1
+      - DOCLING_URL=http://docling-serve:5001
+    extra_hosts:
+      - host.docker.internal:host-gateway
+
+  nginx:
+    image: nginx:latest
+    container_name: nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx:/etc/nginx/conf.d
+      - ./certs:/etc/nginx/certs
+    depends_on:
+      - anythingllm
+    restart: unless-stopped
+
+

@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from urllib import request
 
+from auth_utils import normalize_bearer_token
 from document_loader import DocumentLoader
 
 
@@ -19,7 +20,14 @@ def test_ollama_vlm_smoke_for_image() -> None:
     assert ollama_index_url, "OLLAMA_INDEX_URL is required for VLM smoke test"
     assert vlm_model, "VLM_MODEL is required for VLM smoke test"
 
-    with request.urlopen(f"{ollama_index_url.rstrip('/')}/api/tags", timeout=15) as resp:
+    ollama_bearer = normalize_bearer_token(os.environ.get("OLLAMA_BEARER", ""))
+    req_headers = {"Authorization": ollama_bearer} if ollama_bearer else {}
+    tags_req = request.Request(
+        f"{ollama_index_url.rstrip('/')}/api/tags",
+        headers=req_headers,
+    )
+
+    with request.urlopen(tags_req, timeout=15) as resp:
         payload = json.loads(resp.read().decode("utf-8"))
     model_names = [m.get("name", "") for m in payload.get("models", []) if isinstance(m, dict)]
     assert any(name == vlm_model or name.startswith(f"{vlm_model}:") for name in model_names), (

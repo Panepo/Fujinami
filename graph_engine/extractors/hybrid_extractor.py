@@ -30,6 +30,7 @@ from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+from auth_utils import normalize_bearer_token
 from graph_engine.base import BaseExtractor
 from graph_engine.extractors.llm_extractor import LLMExtractor
 from graph_engine.extractors.spacy_extractor import SpacyExtractor, _load_model
@@ -115,6 +116,7 @@ class HybridExtractor(BaseExtractor):
         self._url = (ollama_url or os.environ.get("OLLAMA_INDEX_URL", "")).rstrip("/")
         self._model = model or os.environ.get("EXTRACT_MODEL", "granite4.1:8b")
         self._timeout = timeout
+        self._auth_header = normalize_bearer_token(os.environ.get("OLLAMA_BEARER", ""))
 
     # Max pairs to send to LLM — hard cap prevents runaway costs
     _MAX_TOTAL_PAIRS = 20
@@ -208,10 +210,13 @@ class HybridExtractor(BaseExtractor):
         }
 
         data = json.dumps(payload).encode()
+        headers = {"Content-Type": "application/json"}
+        if self._auth_header:
+            headers["Authorization"] = self._auth_header
         req = urllib.request.Request(
             f"{self._url}/api/chat",
             data=data,
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             method="POST",
         )
 

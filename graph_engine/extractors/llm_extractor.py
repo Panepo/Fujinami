@@ -22,6 +22,7 @@ import re
 import urllib.request
 from typing import Any
 
+from auth_utils import normalize_bearer_token
 from graph_engine.base import BaseExtractor
 from graph_engine.models import Node, Triple
 
@@ -91,6 +92,7 @@ class LLMExtractor(BaseExtractor):
         self._url = (ollama_url or os.environ.get("OLLAMA_INDEX_URL", "")).rstrip("/")
         self._model = model or os.environ.get("EXTRACT_MODEL", "granite4.1:8b")
         self._timeout = timeout
+        self._auth_header = normalize_bearer_token(os.environ.get("OLLAMA_BEARER", ""))
 
         if not self._url:
             raise ValueError("OLLAMA_INDEX_URL env var or ollama_url parameter is required")
@@ -118,10 +120,13 @@ class LLMExtractor(BaseExtractor):
         }
 
         data = json.dumps(payload).encode()
+        headers = {"Content-Type": "application/json"}
+        if self._auth_header:
+            headers["Authorization"] = self._auth_header
         req = urllib.request.Request(
             f"{self._url}/api/chat",
             data=data,
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             method="POST",
         )
 
