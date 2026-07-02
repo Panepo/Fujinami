@@ -37,7 +37,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /install /usr/local
 
 # Copy application source
-COPY api.py models.py rag_service.py retriever.py reranker.py document_loader.py rewriter.py self_reflector.py __init__.py ./
+COPY api.py models.py rag_service.py retriever.py reranker.py document_loader.py rewriter.py self_reflector.py auth_utils.py __init__.py ./
 COPY models/ ./models/
 COPY indexer/ ./indexer/
 COPY graph_engine/ ./graph_engine/
