@@ -22,7 +22,7 @@ services:
     volumes:
       - ~/.ollama:/root/.ollama
     ports:
-      - 8088:11434
+      - 127.0.0.1:8088:11434
     deploy:
       resources:
         reservations:
@@ -103,14 +103,17 @@ services:
       - ./fujinami-data:/app/data
       - ./fujinami-ragdata:/app/ragdata
     environment:
-      - OLLAMA_INDEX_URL=${AI_SERVER_HOST}
-      - OLLAMA_CHAT_URL=${AI_SERVER_HOST}
+      # --- Core model / server ---
+      - OLLAMA_INDEX_URL=${OLLAMA_SERVER_HOST}
+      - OLLAMA_CHAT_URL=${OLLAMA_SERVER_HOST}
+      - OLLAMA_BEARER=${OLLAMA_BEARER}
+      - OLLAMA_TIMEOUT=1800
       - CHAT_MODEL=nemotron-3-nano:4b
       - CHAT_MODEL_THINK=true
       - EMBEDDING_MODEL=embeddinggemma:300m
       - INDEX_MODEL=granite4.1:8b
-      - CHUNK_SIZE=800
-      - CHUNK_OVERLAP=120
+      - INDEX_TEMPERATURE=0.1
+      # --- VLM ---
       - VLM_MODEL=qwen2.5vl:32b
       - VLM_TIMEOUT=180
       - VLM_TEMPERATURE=0.2
@@ -118,14 +121,35 @@ services:
       - VLM_CAPTION_MAX_TOKENS=100
       - VLM_STRUCTURED_MAX_TOKENS=3000
       - VLM_SYNTHESIS_MAX_TOKENS=1500
-      - EXTRACT_MODEL=granite4.1:8b
+      # --- Document parsing ---
+      - DOCLING_URL=http://docling-serve:5001
+      - DOCLING_BEARER=${DOCLING_BEARER}
+      # --- Chunking ---
+      - CHUNK_SIZE=800
+      - CHUNK_OVERLAP=120
+      - TABLE_CHUNK_SIZE=0
+      # --- Massive-table strategy ---
+      - ENABLE_MASSIVE_TABLE_STRATEGY=1
+      - MASSIVE_ENTITY_METRICS_PER_CHUNK=40
+      - MASSIVE_COMPARISON_WINDOW=4
+      - MASSIVE_COMPARISON_OVERLAP=1
+      - MASSIVE_COMPARISON_MAX_METRICS=36
+      # --- Graph extraction ---
       - GRAPH_EXTRACTOR=hybrid
+      - EXTRACT_MODEL=granite4.1:8b
       - GRAPH_CHUNK_SIZE=400
       - GRAPH_CHUNK_OVERLAP=80
-      - RAGAS_MODEL=gemma4:31b
+      # --- Retrieval ---
       - TOP_K=5
-      - ENABLE_MASSIVE_TABLE_STRATEGY=1
-      - DOCLING_URL=http://docling-serve:5001
+      # --- Reranker ---
+      - ENABLE_RERANKER=false
+      - RERANKER_MODEL=BAAI/bge-reranker-v2-m3
+      - RERANKER_OVERFETCH_FACTOR=3.0
+      - RERANKER_MAX_CANDIDATES=50
+      - RERANKER_DEVICE=auto
+      - RERANKER_BATCH_SIZE=16
+      # --- Misc ---
+      - RAGAS_MODEL=gemma4:31b
     extra_hosts:
       - host.docker.internal:host-gateway
 
@@ -136,8 +160,9 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - ./nginx:/etc/nginx/conf.d
-      - ./certs:/etc/nginx/certs
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/nginx.conf:ro
+      - ./nginx/secrets.conf:/etc/nginx/secrets.conf:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
     depends_on:
       - anythingllm
     restart: unless-stopped

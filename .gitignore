@@ -190,3 +190,4 @@ models/*
 tests/questions/*
 tests/archive/*
 *secret*
+certs

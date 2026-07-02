@@ -811,26 +811,57 @@ async def get_graph_triples(
 
 _ENV_VARS: list[dict] = [
     # key, default (None = required), description
+    # --- Core model / server ---
     {"key": "OLLAMA_INDEX_URL",  "default": None,        "description": "Ollama server used for indexing / embeddings"},
     {"key": "OLLAMA_CHAT_URL",   "default": None,        "description": "Ollama server used for chat / query"},
-    {"key": "CHAT_MODEL",        "default": None,        "description": "Model used for answering queries"},
-    {"key": "EMBEDDING_MODEL",   "default": None,        "description": "Embedding model for vector search"},
-    {"key": "VLM_MODEL",         "default": None,        "description": "Vision-language model for image documents"},
-    {"key": "VLM_TIMEOUT",       "default": "180",       "description": "Timeout (s) for VLM requests"},
-    {"key": "INDEX_MODEL",       "default": "",          "description": "Override model used during indexing"},
-    {"key": "CHUNK_SIZE",        "default": "800",       "description": "Token size per chunk"},
-    {"key": "CHUNK_OVERLAP",     "default": "80",        "description": "Overlap between consecutive chunks"},
-    {"key": "GRAPH_EXTRACTOR",   "default": "hybrid",    "description": "Entity extractor: hybrid | llm | spacy"},
-    {"key": "EXTRACT_MODEL",     "default": "",          "description": "Model used by the LLM graph extractor"},
-
+    {"key": "OLLAMA_BEARER",     "default": "",          "description": "Bearer token for Ollama API authentication"},
     {"key": "OLLAMA_TIMEOUT",    "default": "1800",      "description": "Timeout (s) for Ollama API calls"},
+    {"key": "CHAT_MODEL",        "default": None,        "description": "Model used for answering queries"},
+    {"key": "CHAT_MODEL_THINK",  "default": "",          "description": "Enable extended thinking for reasoning models (1 / true / yes)"},
+    {"key": "EMBEDDING_MODEL",   "default": None,        "description": "Embedding model for vector search"},
+    {"key": "INDEX_MODEL",       "default": "",          "description": "Override model used during indexing (falls back to VLM_MODEL)"},
+    {"key": "INDEX_TEMPERATURE", "default": "0.1",       "description": "Temperature for text narration model during indexing"},
 
-    {"key": "ENABLE_RERANKER",           "default": "false",                              "description": "Enable local cross-encoder reranker (requires sentence-transformers)"},
-    {"key": "RERANKER_MODEL",            "default": "BAAI/bge-reranker-v2-m3",            "description": "Path or HuggingFace model ID for the reranker"},
-    {"key": "RERANKER_OVERFETCH_FACTOR", "default": "3.0",                                "description": "ANN candidate multiplier when reranker is active"},
-    {"key": "RERANKER_MAX_CANDIDATES",   "default": "50",                                 "description": "Hard ceiling on ANN candidates fetched for reranking"},
-    {"key": "RERANKER_DEVICE",           "default": "auto",                               "description": "Reranker compute device: auto | cuda | mps | cpu"},
-    {"key": "RERANKER_BATCH_SIZE",       "default": "16",                                 "description": "Reranker inference batch size"},
+    # --- Vision-language model (VLM) ---
+    {"key": "VLM_MODEL",                    "default": None,   "description": "Vision-language model for image documents"},
+    {"key": "VLM_TIMEOUT",                  "default": "180",  "description": "Timeout (s) for VLM requests"},
+    {"key": "VLM_TEMPERATURE",              "default": "0.2",  "description": "Sampling temperature for the VLM"},
+    {"key": "VLM_SYNTHESIS_TEMPERATURE",    "default": "0.15", "description": "Temperature for VLM synthesis (multi-image) pass"},
+    {"key": "VLM_CAPTION_MAX_TOKENS",       "default": "80",   "description": "Max output tokens for VLM image captions"},
+    {"key": "VLM_STRUCTURED_MAX_TOKENS",    "default": "2600", "description": "Max output tokens for VLM structured extraction"},
+    {"key": "VLM_SYNTHESIS_MAX_TOKENS",     "default": "1200", "description": "Max output tokens for VLM synthesis output"},
+
+    # --- Document parsing ---
+    {"key": "DOCLING_URL",       "default": "http://localhost:5001", "description": "docling-serve base URL for document parsing"},
+
+    # --- Chunking ---
+    {"key": "CHUNK_SIZE",        "default": "800",  "description": "Token size per chunk"},
+    {"key": "CHUNK_OVERLAP",     "default": "80",   "description": "Overlap between consecutive chunks"},
+    {"key": "TABLE_CHUNK_SIZE",  "default": "0",    "description": "Max token size for table chunks (0 = use CHUNK_SIZE)"},
+
+    # --- Massive-table strategy ---
+    {"key": "ENABLE_MASSIVE_TABLE_STRATEGY",    "default": "false", "description": "Enable specialised chunking for massive comparison tables"},
+    {"key": "MASSIVE_ENTITY_METRICS_PER_CHUNK", "default": "40",    "description": "Metrics per chunk for massive entity-profile tables"},
+    {"key": "MASSIVE_COMPARISON_WINDOW",        "default": "4",     "description": "Column window size for massive comparison tables"},
+    {"key": "MASSIVE_COMPARISON_OVERLAP",       "default": "1",     "description": "Column overlap between massive comparison windows"},
+    {"key": "MASSIVE_COMPARISON_MAX_METRICS",   "default": "36",    "description": "Max metrics per chunk in massive comparison tables"},
+
+    # --- Graph extraction ---
+    {"key": "GRAPH_EXTRACTOR",    "default": "hybrid", "description": "Entity extractor: hybrid | llm | spacy"},
+    {"key": "EXTRACT_MODEL",      "default": "",       "description": "Model used by the LLM graph extractor"},
+    {"key": "GRAPH_CHUNK_SIZE",   "default": "400",    "description": "Chunk size used during the graph extraction pass"},
+    {"key": "GRAPH_CHUNK_OVERLAP","default": "80",     "description": "Chunk overlap used during the graph extraction pass"},
+
+    # --- Retrieval ---
+    {"key": "TOP_K",              "default": "5",      "description": "Number of top chunks returned per retrieval query"},
+
+    # --- Reranker ---
+    {"key": "ENABLE_RERANKER",           "default": "false",               "description": "Enable local cross-encoder reranker (requires sentence-transformers)"},
+    {"key": "RERANKER_MODEL",            "default": "BAAI/bge-reranker-v2-m3", "description": "Path or HuggingFace model ID for the reranker"},
+    {"key": "RERANKER_OVERFETCH_FACTOR", "default": "3.0",                 "description": "ANN candidate multiplier when reranker is active"},
+    {"key": "RERANKER_MAX_CANDIDATES",   "default": "50",                  "description": "Hard ceiling on ANN candidates fetched for reranking"},
+    {"key": "RERANKER_DEVICE",           "default": "auto",                "description": "Reranker compute device: auto | cuda | mps | cpu"},
+    {"key": "RERANKER_BATCH_SIZE",       "default": "16",                  "description": "Reranker inference batch size"},
 ]
 
 
